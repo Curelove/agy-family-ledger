@@ -1,9 +1,9 @@
 {
   "name": "agy-family-ledger",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "license": "MIT",
-  "description": "Antigravity 熟人家庭组透明用量账本、按量小额记账与无侵入黑洞预警套件（Cloudflare Workers + 本地桌面控制台 + 零隐私熟人插件）",
+  "description": "Antigravity 家庭组共享额度看板：展示全组剩余额度与成员用量占比，支持单行纯文本绑定码连接与可选按量记账（Cloudflare 免费层运行）",
   "repository": {
     "type": "git",
     "url": "https://github.com/Curelove/agy-family-ledger.git"
@@ -19,6 +19,7 @@
   "scripts": {
     "console": "node local-console/server.mjs",
     "test": "node scripts/test_e2e.mjs",
+    "package:release": "node scripts/package_release.mjs",
     "deploy:worker": "npx wrangler deploy --config worker/wrangler.toml"
   },
   "engines": {

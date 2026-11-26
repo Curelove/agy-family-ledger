@@ -12,6 +12,7 @@ import {
   extractNumericUsageFromLine,
   scanIncrementalTranscriptUsage,
   parseQuotaSummaryResponse,
+  parseInviteCode,
 } from "../member-plugin/sidecars/ledger/collector.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -111,6 +112,21 @@ try {
     assert.equal(snaps.length, 3);
     assert.equal(snaps.find((x) => x.poolKey === "gemini" && x.windowKey === "weekly").remainingPct, 74);
     assert.equal(snaps.find((x) => x.poolKey === "3p" && x.windowKey === "weekly").remainingPct, 91);
+  });
+
+  await test("invite:parse-single-line-binding-code-and-chat-message", async () => {
+    const p1 = parseInviteCode("https://agy-family-ledger.example.workers.dev/#agf_test_sample_token_01");
+    assert.equal(p1.ok, true);
+    assert.equal(p1.serverUrl, "https://agy-family-ledger.example.workers.dev");
+    assert.equal(p1.memberToken, "agf_test_sample_token_01");
+
+    const p2 = parseInviteCode("朋友你好，粘贴这行绑定码：https://demo.workers.dev#agf_test_sample_token_02 即可连接");
+    assert.equal(p2.ok, true);
+    assert.equal(p2.serverUrl, "https://demo.workers.dev");
+    assert.equal(p2.memberToken, "agf_test_sample_token_02");
+
+    const p3 = parseInviteCode("https://demo.workers.dev/without-token");
+    assert.equal(p3.ok, false);
   });
 
   // 2. 账本核心引擎全流程测试
@@ -262,7 +278,18 @@ try {
     });
     d = await store.getAdminDashboard();
     const crit = d.alerts.find((a) => a.kind === "blackhole_critical" && a.pool_key === "3p");
-    assert.ok(crit, "全员在线且凭空暴跌 18% 必须触发红色高危黑洞核查提醒");
+    assert.ok(crit, "全员在线且凭空暴跌 18% 必须触发严重提醒");
+  });
+
+  await test("board:peer-shares-visible-without-leaking-tokens-or-balances", async () => {
+    await store.updateSettings({ ledger_mode: "board_only", show_peer_shares_to_members: true });
+    const view = await store.getMemberSelfView(alice.id, mockNow);
+    assert.equal(view.pricing.ledgerMode, "board_only");
+    assert.equal(view.isLowBalance, false, "纯看板模式不应触发低余额告警");
+    assert.equal(view.peers.length, 3, "应返回全组 3 位成员的透明用量占比");
+    const serialized = JSON.stringify(view.peers);
+    assert.ok(!serialized.includes("agf_"), "peers 列表严禁泄露任何人的 memberToken");
+    assert.ok(!serialized.includes("balance"), "peers 列表严禁泄露任何人的余额字段");
   });
 
   console.log(`\nALL E2E TESTS PASSED (${passed}/${passed})`);

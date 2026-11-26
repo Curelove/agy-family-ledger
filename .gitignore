@@ -1,6 +1,8 @@
-# 本地私密配置与运行数据（含 Cloudflare 网址、ADMIN_SECRET、成员 Token、本地账本数据库）
+# 本地私密配置与运行数据（含 Cloudflare 网址、ADMIN_SECRET、成员 Token、本地数据库与自动备份）
 local-console/data/
 exports/
+backups/
+dist/
 member-plugin/sidecars/ledger/config.json
 worker/wrangler.toml
 

@@ -12,8 +12,28 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 
-const CLIENT_VERSION = "1.0.0";
+const CLIENT_VERSION = "1.1.0";
 const MAX_PENDING_QUEUE = 1500;
+
+/**
+ * 解析单行纯文本绑定码（支持直接从聊天文本中提取 https://域名#agf_xxxx）
+ */
+export function parseInviteCode(raw = "") {
+  const text = String(raw || "").trim();
+  if (!text) return { ok: false, error: "请先粘贴绑定码" };
+  const match = text.match(/(https?:\/\/[^\s#"'<>]+)#(agf_[A-Za-z0-9_]+)/i);
+  if (!match) {
+    return {
+      ok: false,
+      error: "未识别到有效绑定码，完整格式应类似 https://域名#agf_xxxx",
+    };
+  }
+  return {
+    ok: true,
+    serverUrl: match[1].replace(/\/+$/, ""),
+    memberToken: match[2],
+  };
+}
 
 export function getDefaultStatePath() {
   return path.join(os.homedir(), ".gemini", "agy-family-ledger-member-state.json");
@@ -348,10 +368,26 @@ export class MemberLedgerCollector {
   }
 
   saveConfig(patch = {}) {
+    let nextUrl = patch.serverUrl;
+    let nextToken = patch.memberToken;
+    if (patch.inviteCode !== undefined && String(patch.inviteCode).trim() !== "") {
+      const parsed = parseInviteCode(patch.inviteCode);
+      if (!parsed.ok) {
+        throw new Error(parsed.error);
+      }
+      nextUrl = parsed.serverUrl;
+      nextToken = parsed.memberToken;
+    } else if (typeof nextUrl === "string" && nextUrl.includes("#agf_")) {
+      const parsed = parseInviteCode(nextUrl);
+      if (parsed.ok) {
+        nextUrl = parsed.serverUrl;
+        nextToken = parsed.memberToken;
+      }
+    }
     this.config = {
       ...this.config,
-      serverUrl: String(patch.serverUrl ?? this.config.serverUrl ?? "").trim().replace(/\/+$/, ""),
-      memberToken: String(patch.memberToken ?? this.config.memberToken ?? "").trim(),
+      serverUrl: String(nextUrl ?? this.config.serverUrl ?? "").trim().replace(/\/+$/, ""),
+      memberToken: String(nextToken ?? this.config.memberToken ?? "").trim(),
       memberName: String(patch.memberName ?? this.config.memberName ?? "").trim(),
       syncIntervalSec: Math.max(30, Math.min(600, Number(patch.syncIntervalSec ?? this.config.syncIntervalSec) || 90)),
     };

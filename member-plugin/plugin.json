@@ -1,7 +1,7 @@
 {
   "name": "agy-family-ledger",
-  "displayName": "家庭组额度账本",
-  "version": "1.0.0",
-  "description": "熟人家庭组透明用量记账侧边栏：仅统计纯数字 Token 与配额水位，实时查看个人余额、本周消耗与全组双池余量（零代码、零聊天、零进程读取）。",
+  "displayName": "家庭组额度看板",
+  "version": "1.1.0",
+  "description": "家庭组共享额度侧边栏：只统计本地纯数字 Token 与剩余配额百分比，查看全组剩余额度与成员用量占比（支持可选按量记账）。",
   "logo": "assets/logo.svg"
 }

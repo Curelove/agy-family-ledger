@@ -80,12 +80,22 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.api(
     "/api/config",
     async (data) => {
-      collector.saveConfig(data || {});
-      const out = await collector.syncOnce();
-      return new Response(JSON.stringify(out), {
-        contentType: "application/json; charset=utf-8",
-        headers: { "Cache-Control": "no-store" },
-      });
+      try {
+        collector.saveConfig(data || {});
+        const out = await collector.syncOnce();
+        return new Response(JSON.stringify(out), {
+          contentType: "application/json; charset=utf-8",
+          headers: { "Cache-Control": "no-store" },
+        });
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ ok: false, error: String(err?.message || err), state: collector.getPublicState() }),
+          {
+            contentType: "application/json; charset=utf-8",
+            headers: { "Cache-Control": "no-store" },
+          }
+        );
+      }
     },
     "POST"
   );
@@ -118,10 +128,15 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
       return;
     }
     if (u.pathname === "/api/config" && req.method === "POST") {
-      collector.saveConfig(body);
-      const out = await collector.syncOnce();
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify(out));
+      try {
+        collector.saveConfig(body);
+        const out = await collector.syncOnce();
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(out));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: String(err?.message || err), state: collector.getPublicState() }));
+      }
       return;
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });

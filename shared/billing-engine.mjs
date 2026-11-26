@@ -12,24 +12,25 @@
 export const SLICE_MS = 5 * 60 * 1000; // 5 分钟统计切片
 
 export const DEFAULT_SETTINGS = {
-  family_name: "Ultra 20x 熟人家庭组",
-  pricing_mode: "weekly_pct", // 'weekly_pct'（按每周总池%折算，推荐） | 'weighted_units'（按等效百万点折算）
-  gemini_fen_per_weekly_pct: 100, // Gemini 周池每消耗 1% = 1.00 元（默认友情价，可随时在控制台调整）
+  family_name: "家庭组共享额度看板",
+  ledger_mode: "board_only", // 'board_only'（纯看板：只展示各成员用量占比，不记钱）| 'prepaid'（按量记账：启用预存余额与单价折算）
+  pricing_mode: "weekly_pct", // 'weekly_pct'（按每周总池%折算） | 'weighted_units'（按等效百万点折算）
+  gemini_fen_per_weekly_pct: 100, // Gemini 周池每消耗 1% = 1.00 元（仅在 prepaid 模式下生效）
   third_party_fen_per_weekly_pct: 180, // Claude 3P 周池每消耗 1% = 1.80 元
-  gemini_fen_per_million_units: 80, // 备用按等效点计价：每 100 万加权点 = 0.80 元
+  gemini_fen_per_million_units: 80,
   third_party_fen_per_million_units: 200,
-  default_low_balance_fen: 200, // 默认低于 2.00 元提醒续充
-  // 校准：大约多少加权 Token 约等于 1% 周池（用于无并发或黑洞核对参考；可通过试跑校准）
+  default_low_balance_fen: 200,
   expected_units_per_pct_gemini: 1_500_000,
   expected_units_per_pct_3p: 600_000,
-  // 三层防误报黑洞阈值
-  blackhole_min_single_drop_pct: 3.0, // 单次波动小于 3% 忽略（过滤延迟与缓存抖动）
-  blackhole_window_minutes: 15, // 持续观察窗口（分钟）
-  blackhole_warn_missing_pct: 5.0, // 15 分钟内累计未上报缺口 >= 5% 发黄色提醒
-  blackhole_critical_missing_pct: 15.0, // 全员在线但半小时内凭空掉 >= 15% 发红色疑似反代警报
-  offline_grace_minutes: 12, // 超过 12 分钟未上报心跳视为离线
-  calibration_dry_run: true, // 默认开启「7天试跑校准期（只记账不扣余额）」，确认精准后一键切正式扣费
-  quota_snapshot_authority: "owner_only", // 'owner_only'（仅组长设备可上报官方总池水位，防成员伪造水位）| 'all_members'
+  // 异常未统计掉量滤波阈值
+  blackhole_min_single_drop_pct: 3.0,
+  blackhole_window_minutes: 15,
+  blackhole_warn_missing_pct: 5.0,
+  blackhole_critical_missing_pct: 15.0,
+  offline_grace_minutes: 12,
+  calibration_dry_run: true, // 与 ledger_mode 保持同步（board_only => true, prepaid => false），兼容旧数据
+  quota_snapshot_authority: "owner_only", // 'owner_only'（仅组长设备可同步官方总剩余额度）| 'all_members'
+  show_peer_shares_to_members: true, // 允许组内成员在侧边栏看到全组各人的近 7 天用量占比（不含余额与凭证）
 };
 
 /**
@@ -197,7 +198,9 @@ export function allocateSliceUsage({
     const attributedPct = Math.round(explainableDropPct * ratio * 1000) / 1000;
 
     let chargeFen = 0;
-    if (m.role !== "owner" && !cfg.calibration_dry_run) {
+    const isPrepaidBilling =
+      cfg.ledger_mode === "prepaid" || (cfg.ledger_mode === undefined && !cfg.calibration_dry_run);
+    if (m.role !== "owner" && isPrepaidBilling && !cfg.calibration_dry_run) {
       if (cfg.pricing_mode === "weighted_units") {
         chargeFen = Math.round((m.weightedUnits / 1_000_000) * unitPriceMillion);
       } else {
@@ -279,8 +282,8 @@ export function evaluateBlackholeAlert({
       severity: "critical",
       poolKey,
       missingPct: totalMissingPct,
-      title: `${poolLabel}出现高危未上报消耗（约 ${totalMissingPct}%）`,
-      detail: `最近 ${Math.round(Math.max(spanMs, 60000) / 60000)} 分钟内，全组 ${list.length} 位成员的记账插件均在线且本地上报消耗极低，但官方${poolLabel}总水位凭空下降了 ${totalMissingPct}%。建议先在熟人群核对是否有人在未装插件的设备、CLI 或第三方反代工具上使用了账号；确认违规后再由你本人手动处理，系统不会自动踢人。`,
+      title: `${poolLabel}出现较多未统计消耗（约 ${totalMissingPct}%）`,
+      detail: `最近 ${Math.round(Math.max(spanMs, 60000) / 60000)} 分钟内，全组 ${list.length} 位成员的插件均在线且本地上报消耗很低，但官方${poolLabel}总剩余额度下降了 ${totalMissingPct}%。可在群内确认是否有人在未安装插件的设备、命令行工具或第三方转发服务中使用了账号。`,
     };
   }
 
@@ -290,10 +293,10 @@ export function evaluateBlackholeAlert({
     severity: "warning",
     poolKey,
     missingPct: totalMissingPct,
-    title: `${poolLabel}存在未归账缺口（约 ${totalMissingPct}%）`,
+    title: `${poolLabel}存在未统计的额度消耗（约 ${totalMissingPct}%）`,
     detail: offlineNames
-      ? `最近出现约 ${totalMissingPct}% 未上报消耗，当前有 ${offlineMembers.length} 位成员插件离线（${offlineNames}）。大概率是有人在未装插件的设备或临时退出了插件，建议群里顺口核对一下，不必紧张。`
-      : `最近出现约 ${totalMissingPct}% 未上报消耗，低于红警阈值（${critPct}%），可能是官方结算延迟或某台未装插件的终端正在使用，建议留意观察。`,
+      ? `最近出现约 ${totalMissingPct}% 的额度下降未匹配到本地记录，当前有 ${offlineMembers.length} 位成员的插件未在线（${offlineNames}），可能是在未安装插件的设备上使用了账号。`
+      : `最近出现约 ${totalMissingPct}% 的额度下降未匹配到本地记录，可能是官方配额刷新延迟，或某台设备尚未开启插件。`,
   };
 }
 

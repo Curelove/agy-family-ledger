@@ -1,52 +1,56 @@
-# Antigravity 家庭组额度账本
+# Antigravity 家庭组额度看板
 
-面向熟人共享 Google AI Ultra / Antigravity 家庭组的**透明用量分摊账本、预存记账台与无侵入黑洞预警套件**——整套代码完全开源，受邀成员可直接核查采集逻辑，云端中转跑在 Cloudflare Workers + D1 免费额度内，长期 0 元运行。
+供熟人合用 Google AI Ultra / Antigravity 家庭组时查看共享剩余额度与各人近 7 天用量占比的轻量插件与管理面板。后端直接部署在 Cloudflare Workers + D1 免费额度内，无需购买服务器。
 
-<!-- 视觉演示位：可在 GitHub 网页端编辑 README 时直接拖拽上传 5~15 秒演示 GIF 或 MP4 -->
-
----
-
-## 给受邀成员（熟人）：30 秒隐私与安全自查
-
-如果你是收到朋友发来的「专属安装袋」准备安装插件的成员，可以直接点开下方的完整源码核对，无需盲目信任：
-
-- **核心采集器（全文约 450 行、零外部依赖）**：[`member-plugin/sidecars/ledger/collector.mjs`](./member-plugin/sidecars/ledger/collector.mjs)
-- **侧边栏主进程与页面**：[`member-plugin/sidecars/ledger/main.mjs`](./member-plugin/sidecars/ledger/main.mjs)、[`member-plugin/sidecars/ledger/panel.html`](./member-plugin/sidecars/ledger/panel.html)
-
-本插件严格遵守以下隐私边界：
-
-- **仅读取两类纯数字信息**：
-  1. 从本机 Antigravity 对话日志 `transcript.jsonl` 的 `PLANNER_RESPONSE` 行中，使用字段级正则只提取 `step_index`、`model`、`created_at`、`input_tokens`、`cache_read_tokens`、`cache_write_tokens`、`output_tokens` 纯数值计量字段（见 [`extractNumericUsageFromLine`](./member-plugin/sidecars/ledger/collector.mjs#L65-L104)）。
-  2. 仅通过 Antigravity 官方 Sidecar 注入的 `127.0.0.1` 本地接口只读拉取 `RetrieveUserQuotaSummary` 剩余百分比（见 [`fetchLocalQuotaSnapshots`](./member-plugin/sidecars/ledger/collector.mjs#L254-L318)）。
-- **首次安装不翻历史旧账**：首次初始化时会自动记录现有日志的文件末尾偏移量，只统计安装之后的新增对话。
-- **绝不读取、绝不上传**：不碰你的任何代码文件、工作区内容、对话正文 `content`、思考过程 `thinking`、电脑运行进程、本地端口、代理软件配置或账号密码。
-- **绝不拦截或篡改系统**：不会修改 Google / Antigravity 设置，不会自动踢人，也不会限制或阻断你的正常对话。
+<!-- 可在 GitHub 网页端编辑 README 时拖拽上传界面截图或演示动图 -->
 
 ---
 
-## 核心亮点
+## 受邀成员如何安装与核查代码
 
-- **按真实倍率公平拆账**：Gemini 池与 Claude 3P 池分开核算与定价；多人同时使用时，按模型倍率（Carbon 3x、Opus 2x、Neon 1x、Hydrogen/Flash 0.7x）与缓存折算等效 Token 自动公平分摊官方总池掉落的百分比。
-- **小额预存与温和提醒**：支持 1 元 / 5 元 / 10 元 / 20 元快捷记账、低于自定义提醒线时在成员侧边栏温和提示续充，并自动识别官方配额重置（绝不产生负数误扣）。
-- **防篡改水位主权**：服务端默认开启 `owner_only` 权限，仅采信组长本人设备上报的官方总池水位，并强制采用服务端时间校验；普通成员只能上报自身 Token 与查看自身余额，无法伪造水位重置或干扰组长与他人显示。
-- **三层防误报黑洞预警**：当总池出现明显未上报消耗（例如有人在未装插件的设备或第三方反代上消耗额度）时，经过「单次波动过滤 → 持续窗口校验 → 全员在线状态分级」给出黄/红提醒，避免误伤正常延迟。
-- **Cloudflare 免费层 0 元托管**：基于 Cloudflare Workers + D1 SQLite 运行，组长关机期间熟人上报的 Token 照常入库，组长下次开机自动对齐结算。
-- **熟人 30 秒零配置安装**：组长在本地控制台一键导出预填好网址与专属成员码的 `.zip` 安装袋，熟人解压后双击脚本（Windows / macOS / Linux）即可生效。
+本仓库无需接收组长私下打包发来的任何 `.zip` 或脚本文件，所有成员均直接从 GitHub 公开仓库安装同一份代码，再粘贴组长提供的纯文本绑定码即可连接。
+
+### 1. 安装插件（任选一种）
+
+- **通过 AGY Market 直接从本仓库拉取**：
+  ```bash
+  npx agy-market add https://github.com/Curelove/agy-family-ledger/tree/main/member-plugin
+  ```
+- **从 GitHub Releases 下载自动构建包**：
+  前往 [Releases 页面](https://github.com/Curelove/agy-family-ledger/releases/latest) 下载由 GitHub Actions 自动打包的 `agy-family-ledger-plugin-v*.zip`（可对照同页面的 `SHA256SUMS.txt` 校验文件完整性），解压后在 Windows 双击 `install_windows.cmd`，或在 macOS / Linux 执行 `bash install_macos_linux.sh`。
+
+### 2. 粘贴单行绑定码
+
+重启 Antigravity，在右侧边栏打开「家庭组额度看板」，将组长发给你的那一行纯文本绑定码（格式为 `https://域名#agf_xxxx`）粘贴进输入框，点击 **连接看板** 即可。
+
+### 3. 数据读取范围说明（源码可直接查阅）
+
+成员端采集逻辑全部集中在单文件 [`member-plugin/sidecars/ledger/collector.mjs`](./member-plugin/sidecars/ledger/collector.mjs)（约 470 行，无任何第三方依赖）：
+
+- 从本机 Antigravity 日志 `transcript.jsonl` 的已完成步骤中，仅通过正则提取 `step_index`、`model`、`created_at` 与输入/缓存/输出 Token 数字计数（见 [`extractNumericUsageFromLine`](./member-plugin/sidecars/ledger/collector.mjs#L86-L125)），首次运行自动从现有日志末尾开始统计，不追溯安装前的旧记录。
+- 仅通过 Antigravity 官方 Sidecar 注入的 `127.0.0.1` 本地接口只读查询 `RetrieveUserQuotaSummary` 剩余配额百分比（见 [`fetchLocalQuotaSnapshots`](./member-plugin/sidecars/ledger/collector.mjs#L275-L339)）。
+- 不读取任何工作区代码、对话正文 `content`、思考过程 `thinking`、本机进程列表、网络代理配置或账号凭证。
 
 ---
 
-## 透明边界说明（先说清楚它能做什么、不能做什么）
+## 功能与能力边界
 
-- **它本质上是「透明记账与异常预警工具」，不能在 Google 侧强制限流**：Google 家庭组额度由 Google 服务端直接分配给成员账号，任何本地插件都无法在服务器端掐断配额。
-- **适用于互信熟人组团，不适合面向陌生人硬防白嫖**：任何运行在成员本机的插件（无论是否开源）都无法从物理层面阻止对方关闭插件或换设备使用；本工具通过「官方总池水位守恒 + 未上报黑洞预警」确保偷跑无法隐身，但最终处理仍由组长本人线下沟通或手动移出家庭组。
+- **默认纯看板模式，按需开启记账**
+  默认只展示全组 Gemini 4 与 Claude 3P 的周剩余额度、5 小时窗口剩余比例，以及组内每位成员近 7 天的用量占比（按模型倍率与缓存权重自动折算并发比例），界面不出现任何余额与金额字段。若组内确实需要记录预存余额与按比例扣费，可在管理端「设置」中切换为「按量记账模式」。
+- **防篡改权限隔离**
+  服务端强制使用服务器时间，并默认仅接受组长本人设备同步的官方总剩余额度（`owner_only`）。普通成员凭证只能上报自身 Token 计数和查看看板数据，无法伪造总额度变化或修改他人记录。组长电脑关机期间，成员上报的计数会正常保存在 Cloudflare D1 中，待组长下次打开 Antigravity 时自动合并结算。
+- **未统计消耗提醒**
+  当官方总剩余额度的减少量持续超出全组插件上报之和（单次小于 3% 的正常波动自动忽略）时，管理端会记录差值，便于在群内确认是否有人更换了未装插件的电脑或误开了第三方中转工具。
+- **客观能力说明**
+  Google 家庭组配额由 Google 服务端直接授权给各成员账号，本地插件无法在服务器端限制或切断任何人的用量；本工具仅提供透明统计与提醒，适合互信熟人之间同步余量、错峰使用。
 
 ---
 
-## 极速上手（3 步跑通）
+## 组长部署步骤
 
-环境要求：Node.js 22+（使用内置 `node:sqlite` 与原生 `fetch`，无需安装任何 `npm` 运行时依赖）。
+本地运行环境需 Node.js 22 或以上版本（直接使用 Node 内置 `node:sqlite`，无需执行 `npm install` 安装运行时包）。
 
-### 第 1 步：本地体验桌面控制台（30 秒零注册）
+### 1. 本地预览管理界面
 
 ```bash
 git clone https://github.com/Curelove/agy-family-ledger.git
@@ -54,15 +58,9 @@ cd agy-family-ledger
 npm run console
 ```
 
-浏览器打开终端输出的 `http://127.0.0.1:18945`，点击右上角 **演练拆账** 即可体验并发分摊、小额预存与异常预警；也可运行自动化全链路测试验证核心计费与安全边界：
+浏览器打开终端输出的 `http://127.0.0.1:18945` 可先在离线模式下查看界面；运行 `npm test` 可执行全部 10 项端到端测试。
 
-```bash
-npm test
-```
-
-### 第 2 步：5 分钟部署 Cloudflare 免费云端中转（组长操作）
-
-复制模板配置并部署到自己的免费 Cloudflare 账号（无需绑卡）：
+### 2. 部署 Cloudflare 免费云端服务
 
 ```bash
 cp worker/wrangler.example.toml worker/wrangler.toml
@@ -70,61 +68,49 @@ npx wrangler login
 npx wrangler d1 create agy-family-ledger-db
 ```
 
-将返回的 `database_id` 填入 `worker/wrangler.toml`，随后首次发布并写入只有你自己知道的管理员密钥：
+将终端输出的 `database_id` 填入 `worker/wrangler.toml`，然后发布 Worker 并设置管理员密钥：
 
 ```bash
 npx wrangler deploy --config worker/wrangler.toml
 npx wrangler secret put ADMIN_SECRET --config worker/wrangler.toml
 ```
 
-详细图文级分步操作请直接阅读 [`00_部署与熟人安装手把手指南.md`](./00_部署与熟人安装手把手指南.md)。
+更详细的分步操作说明见 [`00_部署与熟人安装手把手指南.md`](./00_部署与熟人安装手把手指南.md)。
 
-### 第 3 步：切换云端并给熟人分发专属安装袋
+### 3. 添加成员并发送绑定码
 
-1. 在本地控制台进入 **价格与连接**，切换到 **Cloudflare 云端模式**，填入 Worker 网址与管理员密钥并保存，点击 **一键安装组长插件到本机**。
-2. 在 **成员与充值** 中点击 **新增熟人** 录入称呼与初始预存金额，再点击该成员右侧的 **安装袋** 生成专属 `.zip`。
-3. 把 `.zip` 发给熟人，解压后双击 `install_windows.cmd`（macOS / Linux 运行 `bash install_macos_linux.sh`）并重启 Antigravity 即可开始透明记账。
+1. 在本地管理控制台打开 **设置**，选择 **Cloudflare 云端同步**，填入刚才生成的 Worker 地址与管理员密钥并保存，点击 **安装组长插件到本机**。
+2. 回到 **看板总览**，点击右上角 **添加成员** 输入朋友称呼，在弹出的窗口中即可一键复制 GitHub 安装说明与该成员专属的纯文本绑定码。
 
 ---
 
-## 目录结构
+## 目录说明
 
 ```text
 agy-family-ledger/
 ├── shared/
-│   ├── billing-engine.mjs       # 纯函数计费、倍率折算、官方重置判定与三层黑洞滤波
-│   ├── ledger-store.mjs         # 统一数据层（兼容 Cloudflare D1 与 Node SQLite）
-│   └── schema.sql               # 数据库建表结构
+│   ├── billing-engine.mjs       # 倍率折算、配额重置识别与异常掉量判断
+│   ├── ledger-store.mjs         # 数据读写层（兼容 Cloudflare D1 与 Node SQLite）
+│   └── schema.sql               # 数据库表结构
 ├── worker/
-│   ├── index.mjs                # Cloudflare Workers 云端记账接口（含权限与时间校验）
-│   └── wrangler.example.toml    # Cloudflare 部署配置模板（不含任何私密 ID）
-├── member-plugin/               # 安装到组长与熟人 Antigravity 的零隐私侧边栏插件
+│   ├── index.mjs                # Cloudflare Workers 接口入口
+│   └── wrangler.example.toml    # Cloudflare 部署配置模板
+├── member-plugin/               # Antigravity 侧边栏插件源码
 │   ├── plugin.json
 │   └── sidecars/ledger/
-│       ├── collector.mjs        # 零隐私纯数值增量采集器（熟人自查核心文件）
-│       ├── main.mjs             # Sidecar 主入口
-│       └── panel.html           # 熟人侧边栏余额与双池水位页面
-├── local-console/               # 组长本地桌面控制台（支持双模式与一键打包安装袋）
+│       ├── collector.mjs        # 纯数字增量采集与绑定码解析
+│       ├── main.mjs             # Sidecar 服务入口
+│       └── panel.html           # 侧边栏界面
+├── local-console/               # 组长本地管理控制台
 │   ├── server.mjs
 │   └── public/
-├── scripts/
-│   └── test_e2e.mjs             # 8 项端到端自动化测试（含零隐私、防伪造、隔夜结算与黑洞过滤）
-└── 00_部署与熟人安装手把手指南.md
+└── scripts/
+    ├── package_release.mjs      # GitHub Releases 自动打包与 SHA-256 生成脚本
+    └── test_e2e.mjs             # 自动化测试套件
 ```
-
----
-
-## 配置与常见问题
-
-- **为什么组长自己也要安装成员插件？**
-  组长账号默认标记为 `owner` 且永远免扣余额；装上后不仅能自动统计你本人的正常消耗占比（避免你跑重活触发黑洞误报），还能在默认 `owner_only` 模式下提供权威的官方总池水位基准。
-- **组长电脑关机期间，熟人还在用怎么办？**
-  熟人端插件会持续把纯数字 Token 上报到你的 Cloudflare D1 云端数据库；等你下次打开 Antigravity 时，组长插件拉取到最新的官方总池水位，服务端会自动回溯上次水位之后的全部熟人消耗并一次性公平结算。
-- **如何先试跑再正式扣费？**
-  账本默认开启 **试跑校准期**（只记占比、不扣余额），建议与熟人先免费试跑 3~7 天核对单价和拆账口径，确认满意后再到 **价格与连接** 中关闭试跑开关即可转入正式扣费。
 
 ---
 
 ## License
 
-基于 [MIT License](./LICENSE) 开源。
+[MIT License](./LICENSE)

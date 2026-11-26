@@ -98,7 +98,7 @@ export class LedgerStore {
         role: "owner",
         initialBalanceFen: 0,
         lowBalanceFen: 0,
-        note: "组长本人设备安装插件后自动计入总池占比，免扣余额，防止自用消耗触发黑洞误报",
+        note: "组长本人设备安装插件后自动计入全组占比，不参与扣费",
       });
     }
   }
@@ -106,21 +106,32 @@ export class LedgerStore {
   async getSettings() {
     const rows = await this.db.all("SELECT key, value FROM settings");
     const out = { ...DEFAULT_SETTINGS };
+    let hasExplicitLedgerMode = false;
     for (const r of rows) {
       if (r.key === BLACKHOLE_BUFFER_KEY) continue;
+      if (r.key === "ledger_mode") hasExplicitLedgerMode = true;
       try {
         out[r.key] = JSON.parse(r.value);
       } catch {
         out[r.key] = r.value;
       }
     }
+    if (!hasExplicitLedgerMode) {
+      out.ledger_mode = out.calibration_dry_run === false ? "prepaid" : "board_only";
+    }
     return out;
   }
 
   async updateSettings(patch = {}) {
     const allowedKeys = new Set(Object.keys(DEFAULT_SETTINGS));
+    const normalized = { ...(patch || {}) };
+    if (normalized.ledger_mode === "board_only" || normalized.ledger_mode === "prepaid") {
+      normalized.calibration_dry_run = normalized.ledger_mode !== "prepaid";
+    } else if (normalized.calibration_dry_run !== undefined) {
+      normalized.ledger_mode = normalized.calibration_dry_run ? "board_only" : "prepaid";
+    }
     const nowIso = new Date(this.nowFn()).toISOString();
-    for (const [k, v] of Object.entries(patch || {})) {
+    for (const [k, v] of Object.entries(normalized)) {
       if (!allowedKeys.has(k)) continue;
       await this.db.run(
         "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
@@ -597,6 +608,42 @@ export class LedgerStore {
       [memberId]
     );
 
+    const isPrepaid = settings.ledger_mode === "prepaid";
+    const showPeerShares = settings.show_peer_shares_to_members !== false;
+    let peers = [];
+    if (showPeerShares) {
+      const offlineGraceMs = Math.max(3, Number(settings.offline_grace_minutes) || 12) * 60 * 1000;
+      const peerMembers = await this.db.all(
+        "SELECT id, name, role, last_seen_at FROM members WHERE status = 'active' ORDER BY CASE WHEN role = 'owner' THEN 0 ELSE 1 END, created_at ASC"
+      );
+      const peerAllocs = await this.db.all(
+        `SELECT member_id, pool_key, SUM(attributed_pct) AS total_pct
+           FROM slice_allocations
+          WHERE slice_start_ms >= ?
+          GROUP BY member_id, pool_key`,
+        [weekStartMs]
+      );
+      const pMap = new Map();
+      for (const r of peerAllocs) {
+        const cur = pMap.get(r.member_id) || { geminiPct: 0, thirdPartyPct: 0 };
+        if (r.pool_key === "3p") cur.thirdPartyPct = Math.round(Number(r.total_pct || 0) * 100) / 100;
+        else cur.geminiPct = Math.round(Number(r.total_pct || 0) * 100) / 100;
+        pMap.set(r.member_id, cur);
+      }
+      peers = peerMembers.map((pm) => {
+        const seenMs = pm.last_seen_at ? Date.parse(pm.last_seen_at) : 0;
+        const w = pMap.get(pm.id) || { geminiPct: 0, thirdPartyPct: 0 };
+        return {
+          name: pm.name,
+          role: pm.role,
+          isSelf: pm.id === memberId,
+          online: Boolean(seenMs && nowMs - seenMs <= offlineGraceMs),
+          geminiPct: w.geminiPct,
+          thirdPartyPct: w.thirdPartyPct,
+        };
+      });
+    }
+
     return {
       id: member.id,
       name: member.name,
@@ -604,18 +651,21 @@ export class LedgerStore {
       status: member.status,
       balanceFen: Number(member.balance_fen || 0),
       lowBalanceFen: Number(member.low_balance_fen || 0),
-      isLowBalance: member.role !== "owner" && Number(member.balance_fen || 0) <= Number(member.low_balance_fen || 0),
-      isDepleted: member.role !== "owner" && Number(member.balance_fen || 0) <= 0,
+      isLowBalance: isPrepaid && member.role !== "owner" && Number(member.balance_fen || 0) <= Number(member.low_balance_fen || 0),
+      isDepleted: isPrepaid && member.role !== "owner" && Number(member.balance_fen || 0) <= 0,
       lastSeenAt: member.last_seen_at || null,
       weekSummary,
       recentTransactions: recentTx,
+      peers,
       pools,
       pricing: {
         familyName: settings.family_name,
+        ledgerMode: isPrepaid ? "prepaid" : "board_only",
+        showPeerShares,
         pricingMode: settings.pricing_mode,
         geminiFenPerWeeklyPct: settings.gemini_fen_per_weekly_pct,
         thirdPartyFenPerWeeklyPct: settings.third_party_fen_per_weekly_pct,
-        calibrationDryRun: Boolean(settings.calibration_dry_run),
+        calibrationDryRun: !isPrepaid,
       },
     };
   }
@@ -721,6 +771,10 @@ export class LedgerStore {
       (s, m) => s + m.week.geminiChargeFen + m.week.thirdPartyChargeFen,
       0
     );
+    const totalWeekGeminiPct =
+      Math.round(members.reduce((s, m) => s + (m.week.geminiPct || 0), 0) * 100) / 100;
+    const totalWeekThirdPartyPct =
+      Math.round(members.reduce((s, m) => s + (m.week.thirdPartyPct || 0), 0) * 100) / 100;
 
     return {
       ok: true,
@@ -734,6 +788,8 @@ export class LedgerStore {
         criticalAlertCount: alerts.filter((a) => !a.acknowledged && a.severity === "critical").length,
         totalTopupFen: Math.round(Number(totalTopupRow?.total || 0)),
         totalWeekChargeFen,
+        totalWeekGeminiPct,
+        totalWeekThirdPartyPct,
       },
       members,
       recentAllocations,

@@ -1,0 +1,63 @@
+name: Release Official Plugin Bundle
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.1.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run E2E & Security Tests
+        run: npm test
+
+      - name: Build Clean Plugin Bundle & SHA256
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: npm run package:release
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          NOTES_FILE="docs/releases/${TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            TITLE="$(head -n 1 "$NOTES_FILE" | sed 's/^#\+[[:space:]]*//')"
+            BODY_FILE="/tmp/release-body.md"
+            tail -n +2 "$NOTES_FILE" > "$BODY_FILE"
+          else
+            TITLE="家庭组额度看板 ${TAG}"
+            BODY_FILE=""
+          fi
+
+          ASSETS=(dist/agy-family-ledger-plugin-${TAG}.zip dist/SHA256SUMS.txt)
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ -n "$BODY_FILE" ]; then
+              gh release edit "$TAG" --title "$TITLE" --notes-file "$BODY_FILE" --draft=false
+            fi
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            if [ -n "$BODY_FILE" ]; then
+              gh release create "$TAG" "${ASSETS[@]}" --title "$TITLE" --notes-file "$BODY_FILE" --verify-tag
+            else
+              gh release create "$TAG" "${ASSETS[@]}" --title "$TITLE" --generate-notes --verify-tag
+            fi
+          fi
