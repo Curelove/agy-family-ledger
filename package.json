@@ -1,0 +1,27 @@
+{
+  "name": "agy-family-ledger",
+  "version": "1.0.1",
+  "type": "module",
+  "license": "MIT",
+  "description": "Antigravity 熟人家庭组透明用量账本、按量小额记账与无侵入黑洞预警套件（Cloudflare Workers + 本地桌面控制台 + 零隐私熟人插件）",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Curelove/agy-family-ledger.git"
+  },
+  "keywords": [
+    "antigravity",
+    "antigravity-plugin",
+    "cloudflare-workers",
+    "cloudflare-d1",
+    "usage-tracker",
+    "family-ledger"
+  ],
+  "scripts": {
+    "console": "node local-console/server.mjs",
+    "test": "node scripts/test_e2e.mjs",
+    "deploy:worker": "npx wrangler deploy --config worker/wrangler.toml"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

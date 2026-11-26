@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="paperBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#352B23"/>
+      <stop offset="100%" stop-color="#1D1713"/>
+    </linearGradient>
+    <linearGradient id="copper" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EBC28B"/>
+      <stop offset="100%" stop-color="#B56E31"/>
+    </linearGradient>
+    <linearGradient id="pine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#5DB3A6"/>
+      <stop offset="100%" stop-color="#2B6B62"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="108" fill="url(#paperBg)"/>
+  <!-- 精装账簿封面轮廓 -->
+  <rect x="104" y="96" width="304" height="320" rx="28" fill="#FAF5EC" fill-opacity="0.06" stroke="url(#copper)" stroke-width="14"/>
+  <!-- 书脊竖线 -->
+  <line x1="158" y1="96" x2="158" y2="416" stroke="url(#copper)" stroke-width="10" stroke-opacity="0.7"/>
+  <!-- 顶部装订标题横线与铜铆钉 -->
+  <line x1="188" y1="168" x2="364" y2="168" stroke="#EBC28B" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="131" cy="168" r="9" fill="#EBC28B"/>
+  <circle cx="131" cy="256" r="9" fill="#EBC28B"/>
+  <circle cx="131" cy="344" r="9" fill="#EBC28B"/>
+  <!-- 双池精铜水位刻度条 -->
+  <rect x="188" y="216" width="176" height="34" rx="17" fill="#FAF5EC" fill-opacity="0.14"/>
+  <rect x="188" y="216" width="132" height="34" rx="17" fill="url(#copper)"/>
+  <rect x="188" y="276" width="176" height="34" rx="17" fill="#FAF5EC" fill-opacity="0.14"/>
+  <rect x="188" y="276" width="152" height="34" rx="17" fill="url(#pine)"/>
+  <!-- 底部刻度标尺点 -->
+  <line x1="194" y1="348" x2="262" y2="348" stroke="#FAF5EC" stroke-opacity="0.55" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="344" cy="348" r="18" fill="#C04A38"/>
+  <path d="M336 348 L342 354 L354 342" fill="none" stroke="#FFFDF9" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,15 @@
+# Cloudflare Workers + D1 免费层部署配置模板（0 元运行）
+# 使用方式：复制本文件为 worker/wrangler.toml，并把下方 database_id 替换成你执行 `npx wrangler d1 create agy-family-ledger-db` 得到的真实 ID。
+# 首次部署步骤请对照项目根目录的《00_部署与熟人安装手把手指南.md》
+
+name = "agy-family-ledger"
+main = "index.mjs"
+compatibility_date = "2026-11-01"
+
+# 免费 D1 SQLite 数据库绑定（创建后把 database_id 替换成你自己的 ID）
+[[d1_databases]]
+binding = "DB"
+database_name = "agy-family-ledger-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# 管理员密钥通过 `npx wrangler secret put ADMIN_SECRET --config worker/wrangler.toml` 加密写入，严禁明文写进本文件

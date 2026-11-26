@@ -1,0 +1,20 @@
+# 本地私密配置与运行数据（含 Cloudflare 网址、ADMIN_SECRET、成员 Token、本地账本数据库）
+local-console/data/
+exports/
+member-plugin/sidecars/ledger/config.json
+worker/wrangler.toml
+
+# 本机编译产物与桌面快捷方式
+local-console/*.exe
+*.lnk
+
+# 依赖、缓存与临时文件
+node_modules/
+.wrangler/
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+*.tmp.*
+.DS_Store
+Thumbs.db

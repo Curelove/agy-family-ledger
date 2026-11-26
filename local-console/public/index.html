@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>家庭组额度账本</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23221E1B'/%3E%3Crect x='16' y='20' width='32' height='8' rx='4' fill='%23EBC28B'/%3E%3Crect x='16' y='36' width='24' height='8' rx='4' fill='%234B948A'/%3E%3C/svg%3E"/>
+  <link rel="stylesheet" href="/styles.css"/>
+</head>
+<body>
+  <div class="ledger-shell">
+    <!-- 顶部账簿题头 -->
+    <header class="masthead">
+      <div class="brand-cluster">
+        <div class="seal-mark" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            <line x1="9" y1="8" x2="16" y2="8"/>
+            <line x1="9" y1="12" x2="14" y2="12"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1 id="hdr-family-name">Ultra 20x 熟人家庭组</h1>
+          <div class="brand-meta">
+            <span class="status-stamp" id="hdr-mode-badge">本地体验模式</span>
+            <span class="status-stamp dry" id="hdr-dry-badge" hidden>试跑校准期（暂不扣费）</span>
+            <span class="sync-hint" id="hdr-sync-time">正在读取账本…</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button class="btn-ghost" id="btn-demo-seed" title="在本地体验模式下生成 2 位熟人的并发拆账示例" hidden>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span>演练拆账</span>
+        </button>
+        <button class="btn-ghost" id="btn-refresh" title="刷新最新水位与成员账目">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+          <span>刷新</span>
+        </button>
+        <button class="btn-ink" id="btn-open-add-member">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>新增熟人</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 纸质账簿索引折签导航（统一底轨母体 + 唯一高亮焦点） -->
+    <nav class="index-tabs" role="tablist" aria-label="账本分区">
+      <button class="index-tab active" data-tab="overview" role="tab" aria-selected="true">总账概览</button>
+      <button class="index-tab" data-tab="members" role="tab" aria-selected="false">成员与充值</button>
+      <button class="index-tab" data-tab="alerts" role="tab" aria-selected="false">
+        <span>异常核查</span>
+        <span class="tab-badge" id="nav-alert-count" hidden>0</span>
+      </button>
+      <button class="index-tab" data-tab="settings" role="tab" aria-selected="false">价格与连接</button>
+    </nav>
+
+    <!-- 主账页容器 -->
+    <main class="ledger-page">
+      <!-- 视图 1：总账概览 -->
+      <section class="tab-view active" id="view-overview">
+        <!-- 双池精铜水位仪表带 -->
+        <div class="waterline-band">
+          <div class="pool-meter">
+            <div class="meter-head">
+              <div class="meter-title">
+                <span class="copper-pip gem"></span>
+                <span>Gemini 4 系列池</span>
+              </div>
+              <div class="meter-readout">
+                <span>周剩余</span>
+                <strong id="ov-gem-week-pct">--</strong>
+              </div>
+            </div>
+            <div class="scale-track" aria-label="Gemini 周池剩余水位">
+              <div class="scale-fill gem" id="ov-gem-week-bar" style="width:0%"></div>
+              <div class="scale-ticks" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+            </div>
+            <div class="meter-foot">
+              <span>5 小时窗口：<strong id="ov-gem-5h-pct">--</strong></span>
+              <span id="ov-gem-reset">等待首条插件心跳上报</span>
+            </div>
+          </div>
+
+          <div class="meter-divider" aria-hidden="true"></div>
+
+          <div class="pool-meter">
+            <div class="meter-head">
+              <div class="meter-title">
+                <span class="copper-pip p3"></span>
+                <span>Claude 3P 独立池</span>
+              </div>
+              <div class="meter-readout">
+                <span>周剩余</span>
+                <strong id="ov-3p-week-pct">--</strong>
+              </div>
+            </div>
+            <div class="scale-track" aria-label="Claude 3P 周池剩余水位">
+              <div class="scale-fill p3" id="ov-3p-week-bar" style="width:0%"></div>
+              <div class="scale-ticks" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+            </div>
+            <div class="meter-foot">
+              <span>5 小时窗口：<strong id="ov-3p-5h-pct">--</strong></span>
+              <span id="ov-3p-reset">等待首条插件心跳上报</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 四项核心摘要数字 -->
+        <div class="kpi-strip">
+          <div class="kpi-item">
+            <div class="kpi-label">在线熟人 / 总人数</div>
+            <div class="kpi-value" id="kpi-online">0 / 0</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">本周记账总额</div>
+            <div class="kpi-value" id="kpi-week-charge">¥0.00</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">累计收到预存</div>
+            <div class="kpi-value positive" id="kpi-total-topup">¥0.00</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">待核对异常提醒</div>
+            <div class="kpi-value" id="kpi-alerts">0 条</div>
+          </div>
+        </div>
+
+        <!-- 双栏：左为成员账目简表，右为最新切片分摊与充值流水 -->
+        <div class="two-col">
+          <div class="col-main">
+            <div class="section-bar">
+              <h2>成员实时账目</h2>
+              <button class="btn-link" id="btn-install-owner-quick">把组长插件装到本机 ↗</button>
+            </div>
+            <div class="member-list" id="ov-member-list"></div>
+          </div>
+
+          <aside class="col-side">
+            <div class="section-bar">
+              <h2>近期拆账与流水</h2>
+            </div>
+            <div class="feed-list" id="ov-activity-feed"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 视图 2：成员与充值 -->
+      <section class="tab-view" id="view-members">
+        <div class="section-bar">
+          <div>
+            <h2>成员名录与安装袋分发</h2>
+            <p class="section-desc">点击任意成员卡片可展开专属成员码、本周用量明细与管理操作；导出安装袋后熟人解压双击即可自动绑定，免手配。</p>
+          </div>
+          <button class="btn-ghost" id="btn-open-exports">打开安装袋目录 ↗</button>
+        </div>
+        <div class="member-list" id="full-member-list"></div>
+
+        <div class="section-bar" style="margin-top:24px;">
+          <h2>充值与调账流水</h2>
+        </div>
+        <div class="table-wrap">
+          <table class="ledger-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>成员</th>
+                <th>类型</th>
+                <th>金额</th>
+                <th>变动后余额</th>
+                <th>备注</th>
+              </tr>
+            </thead>
+            <tbody id="tx-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 视图 3：异常核查 -->
+      <section class="tab-view" id="view-alerts">
+        <div class="rule-callout">
+          <div class="rule-callout-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span>三层防误报黑洞预警原则（不扫熟人电脑 · 绝不自动踢人）</span>
+          </div>
+          <p>系统只核对「官方总池减少量」与「全组插件上报的本地消耗总和」之间的守恒缺口：自动滤除小于 3% 的单次抖动、要求持续超过 15 分钟且缺口达标，并结合成员在线状态区分<strong>黄色提醒（可能换电脑忘开插件）</strong>与<strong>红色高危核查（全员在线却凭空暴跌，疑似外部反代或未授权设备）</strong>。发现异常后由你在群里核实并人工决定处理方式。</p>
+        </div>
+
+        <div class="section-bar" style="margin-top:18px;">
+          <h2>预警与重置记录</h2>
+        </div>
+        <div class="alert-list" id="alert-list"></div>
+      </section>
+
+      <!-- 视图 4：价格与连接 -->
+      <section class="tab-view" id="view-settings">
+        <div class="settings-grid">
+          <!-- 左栏：单价与防误报参数 -->
+          <div class="settings-panel">
+            <h2>单价口径与记账规则</h2>
+            <div class="form-field">
+              <label for="set-family-name">家庭组账本标题</label>
+              <input id="set-family-name" type="text" placeholder="Ultra 20x 熟人家庭组"/>
+            </div>
+
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-title">开启「试跑校准期」（只记占比、暂不扣余额）</div>
+                <div class="toggle-sub">建议和熟人前 7 天先开着试跑，确认分摊误差与黑洞阈值顺手后再关闭并正式扣费。</div>
+              </div>
+              <input type="checkbox" id="set-dry-run" class="switch"/>
+            </div>
+
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-title">仅组长设备可上报官方总池水位（防篡改保护）</div>
+                <div class="toggle-sub">开启后普通成员仅上报自身纯数字 Token，无法伪造总池水位或干扰组长显示；组长关机期间熟人消耗照常入库，下次开机自动对齐结算。</div>
+              </div>
+              <input type="checkbox" id="set-owner-only-quota" class="switch" checked/>
+            </div>
+
+            <div class="field-pair">
+              <div class="form-field">
+                <label for="set-gem-price">Gemini 周池单价（元 / 1%）</label>
+                <input id="set-gem-price" type="number" step="0.1" min="0"/>
+              </div>
+              <div class="form-field">
+                <label for="set-3p-price">Claude 3P 单价（元 / 1%）</label>
+                <input id="set-3p-price" type="number" step="0.1" min="0"/>
+              </div>
+            </div>
+
+            <!-- 实时价格试算卡（改上方单价立刻联动更新） -->
+            <div class="price-preview" id="price-preview">
+              <div class="preview-title">实时计费折算预览（防止定错价算亏）</div>
+              <div class="preview-grid">
+                <div><span>Gemini 消耗 3%</span><strong id="prev-gem-3">--</strong></div>
+                <div><span>Gemini 消耗 10%</span><strong id="prev-gem-10">--</strong></div>
+                <div><span>Gemini 满一周 100%</span><strong id="prev-gem-100">--</strong></div>
+                <div><span>Claude 3P 消耗 3%</span><strong id="prev-3p-3">--</strong></div>
+                <div><span>Claude 3P 消耗 10%</span><strong id="prev-3p-10">--</strong></div>
+                <div><span>整月 Gemini 满额折合</span><strong id="prev-gem-month">--</strong></div>
+              </div>
+            </div>
+
+            <div class="field-pair" style="margin-top:14px;">
+              <div class="form-field">
+                <label for="set-warn-pct">黑洞黄色提醒门槛（15分钟缺口 %）</label>
+                <input id="set-warn-pct" type="number" step="0.5" min="2" max="50"/>
+              </div>
+              <div class="form-field">
+                <label for="set-crit-pct">黑洞红色高危门槛（全员在线缺口 %）</label>
+                <input id="set-crit-pct" type="number" step="1" min="5" max="80"/>
+              </div>
+            </div>
+
+            <button class="btn-ink" id="btn-save-settings">保存账本规则</button>
+          </div>
+
+          <!-- 右栏：云端中转与本地联动 -->
+          <div class="settings-panel">
+            <h2>云端中转连接与本机联动</h2>
+            <div class="mode-switch-group" role="radiogroup" aria-label="运行模式">
+              <label class="mode-option">
+                <input type="radio" name="console-mode" value="local"/>
+                <span>本地体验模式（本机 SQLite，即开即用）</span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="console-mode" value="cloud"/>
+                <span>Cloudflare 云端模式（你关机熟人也能实时记账）</span>
+              </label>
+            </div>
+
+            <div class="form-field" style="margin-top:12px;">
+              <label for="cfg-worker-url">Cloudflare Worker 中转网址</label>
+              <input id="cfg-worker-url" type="url" placeholder="https://agy-family-ledger.你的子域.workers.dev"/>
+            </div>
+
+            <div class="form-field">
+              <label for="cfg-admin-secret">管理员密钥（ADMIN_SECRET，留空则保持原值）</label>
+              <input id="cfg-admin-secret" type="password" placeholder="部署 Worker 时设置的管理员密码"/>
+            </div>
+
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-title">将红/黄预警与低余额通知转发至本地消息通道（可选）</div>
+                <div class="toggle-sub">需在本地配置中指定私聊推送脚本与目标账号，仅发送给组长本人，绝不发往群聊。</div>
+              </div>
+              <input type="checkbox" id="cfg-qq-forward" class="switch"/>
+            </div>
+
+            <div class="btn-pair">
+              <button class="btn-ink" id="btn-save-console-cfg">保存连接设置</button>
+              <button class="btn-ghost" id="btn-install-owner-settings">一键安装组长插件到本机</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 弹窗：新增熟人成员 -->
+  <div class="modal-backdrop" id="modal-add-member" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-add-title">
+      <div class="modal-head">
+        <h3 id="modal-add-title">新增家庭组熟人</h3>
+        <button class="icon-close" data-close-modal="modal-add-member" aria-label="关闭">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label for="add-name">熟人称呼（如：小明、林屿）</label>
+          <input id="add-name" type="text" placeholder="请输入容易辨认的称呼"/>
+        </div>
+        <div class="field-pair">
+          <div class="form-field">
+            <label for="add-init-yuan">初始预存金额（元）</label>
+            <input id="add-init-yuan" type="number" step="0.5" value="10"/>
+          </div>
+          <div class="form-field">
+            <label for="add-low-yuan">低余额提醒线（元）</label>
+            <input id="add-low-yuan" type="number" step="0.5" value="2"/>
+          </div>
+        </div>
+        <div class="form-field">
+          <label for="add-note">备注（选填，例如常用方向）</label>
+          <input id="add-note" type="text" placeholder="例如：偶尔写前端，先预充 10 元试跑"/>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close-modal="modal-add-member">取消</button>
+        <button class="btn-ink" id="btn-confirm-add-member">建档并生成专属码</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：记录熟人小额充值 / 调账 -->
+  <div class="modal-backdrop" id="modal-topup" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-topup-title">
+      <div class="modal-head">
+        <h3 id="modal-topup-title">记录预存充值</h3>
+        <button class="icon-close" data-close-modal="modal-topup" aria-label="关闭">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-target-line">对象：<strong id="topup-member-name">--</strong>（当前余额 <strong id="topup-current-bal">--</strong>）</div>
+        <div class="quick-amounts">
+          <button type="button" class="quick-chip" data-yuan="1">+1 元</button>
+          <button type="button" class="quick-chip" data-yuan="5">+5 元</button>
+          <button type="button" class="quick-chip" data-yuan="10">+10 元</button>
+          <button type="button" class="quick-chip" data-yuan="20">+20 元</button>
+          <button type="button" class="quick-chip" data-yuan="50">+50 元</button>
+        </div>
+        <div class="form-field">
+          <label for="topup-yuan">入账金额（元；输入负数可做手工扣减/退款）</label>
+          <input id="topup-yuan" type="number" step="0.01" value="5"/>
+        </div>
+        <div class="form-field">
+          <label for="topup-note">备注</label>
+          <input id="topup-note" type="text" value="微信转账小额预存"/>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close-modal="modal-topup">取消</button>
+        <button class="btn-ink" id="btn-confirm-topup">确认入账</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 轻提示吐司 -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

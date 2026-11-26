@@ -1,0 +1,20 @@
+{
+  "command": "node",
+  "args": [
+    "main.mjs"
+  ],
+  "restart_policy": "always",
+  "display_name": "家庭组额度账本",
+  "description": "熟人家庭组透明用量与余额侧边栏（零隐私侵入纯数字统计）",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "家庭组额度账本",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "家庭组额度账本"
+      }
+    ]
+  }
+}

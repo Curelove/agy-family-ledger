@@ -1,0 +1,20 @@
+{
+  "appId": "agy-family-ledger-console",
+  "title": "家庭组额度账本",
+  "theme": "light",
+  "width": 1340,
+  "height": 880,
+  "minWidth": 900,
+  "minHeight": 620,
+  "mode": "local_server",
+  "url": "http://127.0.0.1:{PORT}/",
+  "preferredPort": 18945,
+  "portEnvVar": "FAMILY_LEDGER_PORT",
+  "allowPortFallback": true,
+  "healthPath": "/api/health",
+  "healthMatch": "agy-family-ledger-console",
+  "backendLifecycle": "app_owned",
+  "backendExe": "C:\\Program Files\\nodejs\\node.exe",
+  "backendArgs": ["server.mjs"],
+  "backendWorkDir": "{APP_DIR}"
+}

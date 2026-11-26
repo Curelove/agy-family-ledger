@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>家庭组额度账本</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23221E1B'/%3E%3Crect x='16' y='20' width='32' height='8' rx='4' fill='%23EBC28B'/%3E%3Crect x='16' y='36' width='24' height='8' rx='4' fill='%234B948A'/%3E%3C/svg%3E"/>
+<style>
+  :root {
+    --paper: #F6F2EA;
+    --card: #FFFDF9;
+    --well: #ECE6DA;
+    --ink: #231F1C;
+    --muted: #70665C;
+    --border: #DFD6C5;
+    --amber: #B67237;
+    --amber-soft: #F7ECDE;
+    --pine: #2D6A62;
+    --pine-soft: #E5F1EE;
+    --vermilion: #C04A38;
+    --vermilion-soft: #FCECE9;
+    --ok: #3B7A57;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .wrap { padding: 14px 14px 20px; max-width: 520px; margin: 0 auto; }
+  .header {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 12px;
+  }
+  .brand { min-width: 0; }
+  .brand h1 {
+    margin: 0; font-size: 15px; font-weight: 700;
+    font-family: "Georgia", "Noto Serif SC", "Songti SC", serif;
+    letter-spacing: 0.02em;
+  }
+  .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; flex-shrink: 0; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--amber); }
+  .dot.err { background: var(--vermilion); }
+
+  button {
+    appearance: none; -webkit-appearance: none;
+    background: var(--card); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; font-size: 12px; font-weight: 600;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  button:hover { background: var(--well); border-color: #C9BDAA; }
+  button.primary { background: var(--ink); color: #FAF7F2; border-color: var(--ink); }
+  button.primary:hover { background: #3A332E; }
+
+  .banner {
+    border-radius: 10px; padding: 9px 11px; margin-bottom: 12px;
+    font-size: 12px; display: none; align-items: flex-start; gap: 8px;
+  }
+  .banner.show { display: flex; }
+  .banner.warn { background: var(--amber-soft); color: #7C4B1F; border: 1px solid #E8CFAF; }
+  .banner.err { background: var(--vermilion-soft); color: #8F3022; border: 1px solid #EBC0B8; }
+  .banner.dry { background: var(--pine-soft); color: #205049; border: 1px solid #C2DED8; }
+
+  .sheet {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; margin-bottom: 12px;
+  }
+  .balance-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .balance-num {
+    font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; margin: 4px 0 6px;
+  }
+  .balance-num.low { color: var(--amber); }
+  .balance-num.depleted { color: var(--vermilion); }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    font-size: 12px; color: var(--muted);
+    padding-top: 8px; border-top: 1px dashed var(--border);
+  }
+  .meta-row strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .gauge-group { margin-top: 10px; }
+  .gauge-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; margin-bottom: 5px;
+  }
+  .gauge-name { font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .swatch.gem { background: var(--amber); }
+  .swatch.p3 { background: var(--pine); }
+  .gauge-val { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .gauge-val strong { color: var(--ink); }
+  .bar-track {
+    height: 8px; border-radius: 99px; background: var(--well);
+    overflow: hidden; position: relative;
+  }
+  .bar-fill { height: 100%; border-radius: 99px; transition: width 0.3s ease; }
+  .bar-fill.gem { background: var(--amber); }
+  .bar-fill.p3 { background: var(--pine); }
+  .sub-gauge {
+    display: flex; justify-content: space-between; font-size: 12px;
+    color: var(--muted); margin-top: 4px;
+  }
+
+  .week-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .stat-cell {
+    background: var(--paper); border-radius: 9px; padding: 9px 10px; min-width: 0;
+  }
+  .stat-cell .k { font-size: 12px; color: var(--muted); }
+  .stat-cell .v { font-size: 16px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat-cell .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  details { margin-bottom: 10px; }
+  details > summary {
+    cursor: pointer; list-style: none; font-size: 12px; font-weight: 700;
+    color: var(--ink); padding: 10px 12px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 10px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  details[open] > summary { border-radius: 10px 10px 0 0; border-bottom: none; }
+  .details-body {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 0 0 10px 10px; padding: 12px;
+  }
+  .tx-row {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 12px;
+  }
+  .tx-row:last-child { border-bottom: none; }
+  .tx-pos { color: var(--ok); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tx-neg { color: var(--vermilion); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+  .field input {
+    width: 100%; padding: 7px 9px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--paper); color: var(--ink);
+    font-size: 12px; outline: none;
+  }
+  .field input:focus { border-color: var(--amber); background: var(--card); }
+
+  .privacy-note {
+    font-size: 12px; color: var(--muted); background: var(--well);
+    border-radius: 10px; padding: 9px 11px; display: flex; gap: 8px; align-items: flex-start;
+  }
+  .privacy-note svg { flex-shrink: 0; margin-top: 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="brand">
+      <h1 id="family-title">家庭组额度账本</h1>
+      <div class="sub">
+        <span class="dot" id="sync-dot"></span>
+        <span id="sync-text">正在读取本地记账状态…</span>
+      </div>
+    </div>
+    <button id="btn-sync" title="立即同步一次用量与余额">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+      <span>同步</span>
+    </button>
+  </div>
+
+  <div class="banner dry" id="banner-dry">
+    <span>当前处于<strong>试跑校准期</strong>：正常统计各成员消耗占比，暂不扣减预存余额。</span>
+  </div>
+  <div class="banner warn" id="banner-low">
+    <span id="banner-low-text">你的预存余额偏低，使用完后可联系组长微信续充。</span>
+  </div>
+  <div class="banner err" id="banner-err">
+    <span id="banner-err-text"></span>
+  </div>
+
+  <section class="sheet">
+    <div class="balance-top">
+      <span class="label" id="member-role-label">我的预存余额</span>
+      <span class="label" id="member-name-badge">未绑定成员</span>
+    </div>
+    <div class="balance-num" id="balance-display">--</div>
+    <div class="meta-row">
+      <span>Gemini 单价：<strong id="price-gem">--</strong></span>
+      <span>Claude 3P 单价：<strong id="price-3p">--</strong></span>
+      <span>待传队列：<strong id="queue-count">0</strong></span>
+    </div>
+  </section>
+
+  <section class="sheet">
+    <div class="label">全组共享水位（便于错峰使用）</div>
+    <div class="gauge-group">
+      <div class="gauge-head">
+        <span class="gauge-name"><span class="swatch gem"></span>Gemini 4 系列池</span>
+        <span class="gauge-val">周剩余 <strong id="gem-week-pct">--</strong></span>
+      </div>
+      <div class="bar-track"><div class="bar-fill gem" id="gem-week-bar" style="width:0%"></div></div>
+      <div class="sub-gauge">
+        <span>5 小时窗口：<strong id="gem-5h-pct">--</strong></span>
+        <span id="gem-reset">重置时间待采集</span>
+      </div>
+    </div>
+
+    <div class="gauge-group" style="margin-top:14px;">
+      <div class="gauge-head">
+        <span class="gauge-name"><span class="swatch p3"></span>Claude 3P 池</span>
+        <span class="gauge-val">周剩余 <strong id="p3-week-pct">--</strong></span>
+      </div>
+      <div class="bar-track"><div class="bar-fill p3" id="p3-week-bar" style="width:0%"></div></div>
+      <div class="sub-gauge">
+        <span>5 小时窗口：<strong id="p3-5h-pct">--</strong></span>
+        <span id="p3-reset">重置时间待采集</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="sheet">
+    <div class="label">我本周已记账消耗</div>
+    <div class="week-grid">
+      <div class="stat-cell">
+        <div class="k">Gemini 周池占比</div>
+        <div class="v" id="my-gem-pct">0.00%</div>
+        <div class="s" id="my-gem-cost">记账 ¥0.00</div>
+      </div>
+      <div class="stat-cell">
+        <div class="k">Claude 3P 占比</div>
+        <div class="v" id="my-3p-pct">0.00%</div>
+        <div class="s" id="my-3p-cost">记账 ¥0.00</div>
+      </div>
+    </div>
+  </section>
+
+  <details id="tx-details">
+    <summary>
+      <span>近期充值与调账记录</span>
+      <span style="color:var(--muted);font-weight:400;" id="tx-count">0 条</span>
+    </summary>
+    <div class="details-body" id="tx-list">
+      <div style="color:var(--muted);font-size:12px;">暂无记录</div>
+    </div>
+  </details>
+
+  <details id="cfg-details">
+    <summary>
+      <span>连接配置</span>
+      <span style="color:var(--muted);font-weight:400;" id="cfg-status">检查中</span>
+    </summary>
+    <div class="details-body">
+      <div class="field">
+        <label for="inp-url">家庭组中转网址</label>
+        <input id="inp-url" placeholder="https://agy-family-ledger.你的域名.workers.dev"/>
+      </div>
+      <div class="field">
+        <label for="inp-token">我的专属成员码（更换时重新粘贴）</label>
+        <input id="inp-token" placeholder="agf_xxxxxxxxxxxxxxxx"/>
+      </div>
+      <button class="primary" id="btn-save-cfg">保存并立即同步</button>
+    </div>
+  </details>
+
+  <div class="privacy-note">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+    <span>隐私承诺：本插件仅汇总本地纯数字 Token 计数与配额水位百分比，<strong>不读取</strong>任何代码、聊天内容、电脑进程或代理配置。</span>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const yuan = (fen) => "¥" + ((Number(fen) || 0) / 100).toFixed(2);
+const pctText = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(1) + "%" : "--");
+
+function fmtReset(iso) {
+  if (!iso) return "重置时间待更新";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "重置时间待更新";
+  return "重置于 " + d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function render(state) {
+  const mv = state.memberView;
+  const dot = $("sync-dot");
+  const syncText = $("sync-text");
+
+  if (!state.configured) {
+    dot.className = "dot warn";
+    syncText.textContent = "等待填写中转网址与成员码";
+    $("cfg-details").open = true;
+  } else if (state.lastError) {
+    dot.className = "dot err";
+    syncText.textContent = "同步受阻，已暂存本地队列";
+  } else {
+    dot.className = "dot ok";
+    const t = state.lastSyncAt ? new Date(state.lastSyncAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "刚刚";
+    syncText.textContent = "已与家庭组同步 · " + t;
+  }
+
+  $("queue-count").textContent = String(state.pendingQueueCount || 0);
+  $("cfg-status").textContent = state.configured ? "已配置 (" + state.config.tokenPreview + ")" : "未配置";
+  if (!$("inp-url").value && state.config.serverUrl) $("inp-url").value = state.config.serverUrl;
+
+  $("banner-err").classList.toggle("show", Boolean(state.lastError && state.configured));
+  $("banner-err-text").textContent = state.lastError || "";
+
+  if (mv) {
+    $("family-title").textContent = mv.pricing?.familyName || "家庭组额度账本";
+    $("member-name-badge").textContent = mv.name + (mv.role === "owner" ? " · 组长" : "");
+    $("banner-dry").classList.toggle("show", Boolean(mv.pricing?.calibrationDryRun));
+
+    const balEl = $("balance-display");
+    if (mv.role === "owner") {
+      $("member-role-label").textContent = "组长模式（免扣费 · 参与全组占比核算）";
+      balEl.textContent = "免扣费";
+      balEl.className = "balance-num";
+      $("banner-low").classList.remove("show");
+    } else {
+      $("member-role-label").textContent = "我的预存余额";
+      balEl.textContent = yuan(mv.balanceFen);
+      balEl.className = "balance-num" + (mv.isDepleted ? " depleted" : mv.isLowBalance ? " low" : "");
+      $("banner-low").classList.toggle("show", Boolean(mv.isLowBalance || mv.isDepleted));
+      $("banner-low-text").textContent = mv.isDepleted
+        ? "当前余额已用完（" + yuan(mv.balanceFen) + "），请联系组长微信续充后再继续使用重型任务。"
+        : "当前余额偏低（低于提醒线 " + yuan(mv.lowBalanceFen) + "），建议提前联系组长续充。";
+    }
+
+    $("price-gem").textContent = yuan(mv.pricing?.geminiFenPerWeeklyPct) + " / 1%周池";
+    $("price-3p").textContent = yuan(mv.pricing?.thirdPartyFenPerWeeklyPct) + " / 1%周池";
+
+    $("my-gem-pct").textContent = (mv.weekSummary?.geminiPct || 0).toFixed(2) + "%";
+    $("my-gem-cost").textContent = mv.role === "owner" ? "组长自用不计费" : "记账 " + yuan(mv.weekSummary?.geminiChargeFen);
+    $("my-3p-pct").textContent = (mv.weekSummary?.thirdPartyPct || 0).toFixed(2) + "%";
+    $("my-3p-cost").textContent = mv.role === "owner" ? "组长自用不计费" : "记账 " + yuan(mv.weekSummary?.thirdPartyChargeFen);
+
+    const gemW = mv.pools?.gemini?.weekly;
+    const gem5 = mv.pools?.gemini?.["5h"];
+    const p3W = mv.pools?.["3p"]?.weekly;
+    const p35 = mv.pools?.["3p"]?.["5h"];
+    $("gem-week-pct").textContent = pctText(gemW?.remainingPct);
+    $("gem-week-bar").style.width = (gemW ? Math.max(0, Math.min(100, gemW.remainingPct)) : 0) + "%";
+    $("gem-5h-pct").textContent = pctText(gem5?.remainingPct);
+    $("gem-reset").textContent = fmtReset(gemW?.resetAt);
+
+    $("p3-week-pct").textContent = pctText(p3W?.remainingPct);
+    $("p3-week-bar").style.width = (p3W ? Math.max(0, Math.min(100, p3W.remainingPct)) : 0) + "%";
+    $("p3-5h-pct").textContent = pctText(p35?.remainingPct);
+    $("p3-reset").textContent = fmtReset(p3W?.resetAt);
+
+    const txs = mv.recentTransactions || [];
+    $("tx-count").textContent = txs.length + " 条";
+    $("tx-list").innerHTML = txs.length
+      ? txs.map((t) => {
+          const dt = new Date(t.created_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+          const cls = t.amount_fen >= 0 ? "tx-pos" : "tx-neg";
+          const sign = t.amount_fen >= 0 ? "+" : "";
+          return '<div class="tx-row"><div><div>' + (t.note || (t.kind === "topup" ? "微信/支付宝充值" : "账目调整")) + '</div><div style="color:var(--muted)">' + dt + '</div></div><div class="' + cls + '">' + sign + yuan(t.amount_fen) + "</div></div>";
+        }).join("")
+      : '<div style="color:var(--muted);font-size:12px;">暂无充值记录</div>';
+  }
+}
+
+async function loadState() {
+  const res = await fetch("/api/state");
+  render(await res.json());
+}
+
+$("btn-sync").addEventListener("click", async () => {
+  $("btn-sync").disabled = true;
+  try {
+    const res = await fetch("/api/sync-now", { method: "POST" });
+    const data = await res.json();
+    if (data.state) render(data.state);
+  } finally {
+    $("btn-sync").disabled = false;
+  }
+});
+
+$("btn-save-cfg").addEventListener("click", async () => {
+  const serverUrl = $("inp-url").value.trim();
+  const memberToken = $("inp-token").value.trim();
+  const payload = { serverUrl };
+  if (memberToken) payload.memberToken = memberToken;
+  const res = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (data.state) {
+    $("inp-token").value = "";
+    render(data.state);
+  }
+});
+
+loadState();
+setInterval(loadState, 30000);
+</script>
+</body>
+</html>
