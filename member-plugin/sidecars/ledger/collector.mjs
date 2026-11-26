@@ -1,38 +1,174 @@
 /**
- * 成员端零隐私侵入数据采集器（Windows / macOS / Linux 全平台零依赖）
+ * 成员端零隐私侵入数据采集器 (v1.2.0 · Windows / macOS / Linux 全平台零依赖)
  *
  * 严格隐私边界：
- * 1. 读取本机 Antigravity 会话日志目录中的 transcript.jsonl 时，
- *    仅用字段级正则提取纯数字 Token 统计与模型名，永不读取、永不上传任何正文 content / thinking 文本。
- * 2. 读取官方配额水位时，仅使用宿主官方 Sidecar 注入的 127.0.0.1 本地接口（RetrieveUserQuotaSummary）。
+ * 1. 读取本机 Antigravity 会话日志 transcript.jsonl 时，仅读取顶层纯数字 Token 计数、模型名、步数索引与时间戳，
+ *    绝不读取、存储或上传任何对话正文 content、思考内容 thinking 或工具调用参数 tool_calls；会话 ID 经 SHA-256 短哈希脱敏。
+ * 2. 读取官方配额水位时，仅调用宿主 Sidecar 注入的 127.0.0.1 本地接口（RetrieveUserQuotaSummary）。
  * 3. 永不扫描本机进程、端口、代理配置或任何工作区文件。
  */
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
+import tls from "node:tls";
+import crypto from "node:crypto";
 
-const CLIENT_VERSION = "1.1.0";
+const CLIENT_VERSION = "1.2.0";
 const MAX_PENDING_QUEUE = 1500;
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_SCAN_BYTES_PER_POLL = 8 * 1024 * 1024;
+const MAX_TRACKED_FILES = 2000;
+
+function isLoopbackHost(hostname = "") {
+  const h = String(hostname || "").toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]";
+}
+
+function isPrivateLanHost(hostname = "") {
+  const h = String(hostname || "").toLowerCase();
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true;
+  if (/^0\.0\.0\.0$/.test(h)) return true;
+  const m172 = h.match(/^172\.(\d+)\./);
+  if (m172 && Number(m172[1]) >= 16 && Number(m172[1]) <= 31) return true;
+  return false;
+}
+
+export function formatAgreedRuleSummary(rules) {
+  if (!rules || typeof rules !== "object") return "未记录初始约定";
+  if (rules.ledgerMode !== "prepaid") {
+    return "纯看板模式（仅统计用量占比，不计费用）";
+  }
+  const g = ((Number(rules.geminiFenPerWeeklyPct) || 100) / 100).toFixed(2);
+  const p = ((Number(rules.thirdPartyFenPerWeeklyPct) || 180) / 100).toFixed(2);
+  return `按量记账模式（Gemini ¥${g}/1%，Claude 3P ¥${p}/1%）`;
+}
 
 /**
- * 解析单行纯文本绑定码（支持直接从聊天文本中提取 https://域名#agf_xxxx）
+ * 构造含初始规则约定的纯文本绑定码：
+ * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>
+ */
+export function buildInviteCode({
+  serverUrl = "",
+  memberToken = "",
+  ruleVersion = 1,
+  ledgerMode = "board_only",
+  geminiFenPerWeeklyPct = 100,
+  thirdPartyFenPerWeeklyPct = 180,
+} = {}) {
+  const cleanUrl = String(serverUrl || "").trim().replace(/\/+$/, "");
+  const cleanToken = String(memberToken || "").trim();
+  const modeShort = ledgerMode === "prepaid" ? "prepaid" : "board";
+  const v = Math.max(1, Math.round(Number(ruleVersion) || 1));
+  const g = Math.max(0, Math.round(Number(geminiFenPerWeeklyPct) || 100));
+  const p = Math.max(0, Math.round(Number(thirdPartyFenPerWeeklyPct) || 180));
+  return `${cleanUrl}#${cleanToken}&v=${v}&m=${modeShort}&g=${g}&p=${p}`;
+}
+
+/**
+ * 解析单行纯文本绑定码（兼容旧版 https://域名#agf_xxxx 与新版含规则约定后缀）
+ * 安全约束：公网地址强制要求 https://，拦截私网 LAN 与非 loopback 的明文 http://
  */
 export function parseInviteCode(raw = "") {
   const text = String(raw || "").trim();
   if (!text) return { ok: false, error: "请先粘贴绑定码" };
-  const match = text.match(/(https?:\/\/[^\s#"'<>]+)#(agf_[A-Za-z0-9_]+)/i);
+  const match = text.match(/(https?:\/\/[^\s#"'<>]+)#(agf_[A-Za-z0-9_]+)([^\s"'<>]*)/i);
   if (!match) {
     return {
       ok: false,
       error: "未识别到有效绑定码，完整格式应类似 https://域名#agf_xxxx",
     };
   }
+
+  const rawServerUrl = match[1].replace(/\/+$/, "");
+  const memberToken = match[2];
+  const extraFrag = match[3] || "";
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawServerUrl);
+  } catch {
+    return { ok: false, error: "绑定码中的服务端网址格式不正确" };
+  }
+
+  const host = parsedUrl.hostname.toLowerCase();
+  if (isPrivateLanHost(host)) {
+    return { ok: false, error: "出于安全限制，不允许绑定到内网或保留 IP 地址" };
+  }
+  if (parsedUrl.protocol === "http:" && !isLoopbackHost(host)) {
+    return { ok: false, error: "出于安全限制，公网服务端地址必须使用 https:// 加密连接" };
+  }
+  if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+    return { ok: false, error: "仅支持 https://（或本机调试 127.0.0.1）地址" };
+  }
+
+  let agreedRules = null;
+  if (extraFrag && extraFrag.includes("=")) {
+    const params = new URLSearchParams(extraFrag.replace(/^[&?]+/, ""));
+    const rawV = Number(params.get("v"));
+    const rawM = params.get("m");
+    const rawG = Number(params.get("g"));
+    const rawP = Number(params.get("p"));
+    if (Number.isFinite(rawV) && rawV >= 1 && (rawM === "board" || rawM === "prepaid")) {
+      agreedRules = {
+        ruleVersion: Math.round(rawV),
+        ledgerMode: rawM === "prepaid" ? "prepaid" : "board_only",
+        geminiFenPerWeeklyPct: Number.isFinite(rawG) && rawG >= 0 ? Math.round(rawG) : 100,
+        thirdPartyFenPerWeeklyPct: Number.isFinite(rawP) && rawP >= 0 ? Math.round(rawP) : 180,
+        agreedAt: new Date().toISOString(),
+        source: "invite_code",
+      };
+    }
+  }
+
   return {
     ok: true,
-    serverUrl: match[1].replace(/\/+$/, ""),
-    memberToken: match[2],
+    serverUrl: rawServerUrl,
+    memberToken,
+    agreedRules,
   };
+}
+
+export function evaluateRuleMismatch(agreedRules, memberView) {
+  if (!memberView || !memberView.pricing || memberView.role === "owner") {
+    return { mismatch: false };
+  }
+  const serverPricing = memberView.pricing;
+  const serverVersion = Math.max(1, Number(serverPricing.ruleVersion) || 1);
+  const serverNeedsConfirm = Boolean(memberView.needsRuleConfirm);
+
+  if (!agreedRules) {
+    if (serverNeedsConfirm) {
+      return {
+        mismatch: true,
+        agreedRuleVersion: Number(memberView.acceptedRuleVersion || 1),
+        serverRuleVersion: serverVersion,
+        agreedSummary: "入组初始规则",
+        currentSummary: serverPricing.summaryText || formatAgreedRuleSummary(serverPricing),
+      };
+    }
+    return { mismatch: false };
+  }
+
+  const localVer = Math.max(1, Number(agreedRules.ruleVersion) || 1);
+  const modeDiff = agreedRules.ledgerMode !== serverPricing.ledgerMode;
+  const priceDiff =
+    serverPricing.ledgerMode === "prepaid" &&
+    (Number(agreedRules.geminiFenPerWeeklyPct) !== Number(serverPricing.geminiFenPerWeeklyPct) ||
+      Number(agreedRules.thirdPartyFenPerWeeklyPct) !== Number(serverPricing.thirdPartyFenPerWeeklyPct));
+
+  if (serverNeedsConfirm || modeDiff || priceDiff || serverVersion > localVer) {
+    return {
+      mismatch: true,
+      agreedRuleVersion: localVer,
+      serverRuleVersion: serverVersion,
+      agreedSummary: formatAgreedRuleSummary(agreedRules),
+      currentSummary: serverPricing.summaryText || formatAgreedRuleSummary(serverPricing),
+    };
+  }
+  return { mismatch: false };
 }
 
 export function getDefaultStatePath() {
@@ -74,48 +210,67 @@ function writeJsonAtomic(filePath, data) {
 }
 
 export function classifyModelPool(modelName = "") {
-  const s = String(modelName || "").toLowerCase();
-  if (/claude|opus|sonnet|haiku|anthropic|gpt|openai|o1|o3|o4|^3p/.test(s)) return "3p";
-  return "gemini";
+  const s = String(modelName || "").trim().toLowerCase();
+  if (!s) return "gemini";
+  if (/gemini|gemma|\bneon\b|\bcarbon\b|\bhydrogen\b|\bargon\b|\bflash\b/.test(s)) {
+    return "gemini";
+  }
+  if (/claude|opus|sonnet|haiku|anthropic|gpt|openai|\bo1\b|\bo3\b|\bo4\b|deepseek|qwen|llama|mistral|^3p/.test(s)) {
+    return "3p";
+  }
+  return "3p";
+}
+
+function hashConvId(convId = "") {
+  return crypto.createHash("sha256").update(String(convId || "local")).digest("hex").slice(0, 10);
 }
 
 /**
- * 纯正则提取单行 PLANNER_RESPONSE 的纯数值计量字段（不触碰 content / thinking）
+ * 提取单行 PLANNER_RESPONSE 的纯数值计量字段（严格只读取顶层数字与模型名，不访问 content / thinking / tool_calls）
+ * 注：在 Antigravity 原生日志中，input_tokens 本身就是不含缓存的新增未缓存输入 Token，与 cache_read_tokens 互斥。
  */
 export function extractNumericUsageFromLine(line = "", convId = "") {
   if (!line || !line.includes('"PLANNER_RESPONSE"')) return null;
-  if (!line.includes('"status":"DONE"') && !line.includes('"status": "DONE"')) return null;
 
-  const numField = (key) => {
-    const m = line.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`));
-    return m ? Number(m[1]) : 0;
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object" || obj.type !== "PLANNER_RESPONSE") return null;
+
+  const status = String(obj.status || "").toUpperCase();
+  if (status !== "DONE" && status !== "CANCELLED" && status !== "ERROR") return null;
+
+  const meta = obj.usage && typeof obj.usage === "object" ? obj.usage : obj;
+  const numVal = (k) => {
+    const v = Number(obj[k] ?? meta[k]);
+    return Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
   };
-  const strField = (key) => {
-    const m = line.match(new RegExp(`"${key}"\\s*:\\s*"([^"]{1,96})"`));
-    return m ? m[1] : "";
-  };
 
-  const stepIndex = numField("step_index");
-  const modelName = strField("model");
-  const createdAt = strField("created_at");
-  const inputTokens = numField("input_tokens");
-  const cacheReadTokens = numField("cache_read_tokens");
-  const cacheWriteTokens = numField("cache_write_tokens");
-  const outputTokens = numField("output_tokens");
+  const stepIndex = numVal("step_index");
+  const modelName = String(obj.model || meta.model || "").trim().slice(0, 80);
+  const createdAt = typeof obj.created_at === "string" ? obj.created_at : "";
+  const inputTokens = numVal("input_tokens");
+  const cacheReadTokens = numVal("cache_read_tokens");
+  const cacheWriteTokens = numVal("cache_write_tokens");
+  const thinkingTokens = numVal("thinking_tokens");
+  const outputTokens = numVal("output_tokens") + thinkingTokens;
 
-  if (!modelName && inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0) {
+  // 对中断/报错步骤，仅当实际产生了非零 Token 消耗才计入
+  if (inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0 && cacheWriteTokens === 0) {
     return null;
   }
   const tsMs = createdAt ? Date.parse(createdAt) : Date.now();
-  const uncachedInputTokens = Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens);
-  const shortConv = String(convId || "local").slice(0, 12);
+  const shortHash = hashConvId(convId);
 
   return {
-    id: `${shortConv}:s${stepIndex}`,
+    id: `${shortHash}:s${stepIndex}`,
     poolKey: classifyModelPool(modelName),
     modelName,
     requestCount: 1,
-    uncachedInputTokens,
+    uncachedInputTokens: inputTokens,
     cacheReadTokens,
     cacheWriteTokens,
     outputTokens,
@@ -124,9 +279,42 @@ export function extractNumericUsageFromLine(line = "", convId = "") {
 }
 
 /**
- * 增量扫描本机 Antigravity App / IDE 的 transcript.jsonl（仅扫描最近 48 小时修改过的文件）
+ * 读取 transcript 文件首行时间戳（用于区分「安装前历史老对话」与「安装后新建对话/子代理」）
  */
-export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = null) {
+function peekConversationStartMs(logPath, stat) {
+  let fd = null;
+  try {
+    fd = fs.openSync(logPath, "r");
+    const head = Buffer.allocUnsafe(Math.min(1024, stat.size));
+    const n = fs.readSync(fd, head, 0, head.length, 0);
+    const firstStr = head.subarray(0, n).toString("utf8");
+    const m = firstStr.match(/"created_at"\s*:\s*"([^"]{10,40})"/);
+    if (m) {
+      const parsed = Date.parse(m[1]);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  } catch {
+    // 忽略读取异常
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+  if (Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0) {
+    return stat.birthtimeMs;
+  }
+  return stat.mtimeMs;
+}
+
+/**
+ * 增量扫描本机 Antigravity 的 transcript.jsonl：
+ * - 首次建档记录 installedAtMs：安装前已存在的旧对话锚定在末尾不翻旧账；
+ * - 安装后新开的对话与子代理（首行时间 >= installedAtMs - 5s）从 offset=0 完整读取，不再漏计首轮消耗；
+ * - 流式扫描 0x0A 换行字节，遇到单行超 4MB 的巨型行自动跳过并推进游标，永不卡死。
+ */
+export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = null, { nowMs = Date.now() } = {}) {
   const dirs =
     Array.isArray(transcriptRoots) && transcriptRoots.length
       ? transcriptRoots
@@ -135,7 +323,11 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
   if (!stateObj.fileOffsets || typeof stateObj.fileOffsets !== "object") {
     stateObj.fileOffsets = {};
   }
-  const cutoffMs = Date.now() - 48 * 3600 * 1000;
+  if (!Number.isFinite(Number(stateObj.installedAtMs)) || Number(stateObj.installedAtMs) <= 0) {
+    stateObj.installedAtMs = nowMs;
+  }
+  const installedAtMs = Number(stateObj.installedAtMs);
+  const cutoffMs = nowMs - 48 * 3600 * 1000;
   const freshEvents = [];
 
   for (const root of dirs) {
@@ -160,31 +352,90 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
       if (!st.isFile() || st.mtimeMs < cutoffMs) continue;
 
       const key = logPath.toLowerCase();
-      let offset = Number(stateObj.fileOffsets[key] || 0);
-      // 首次初始化时，仅从当前文件末尾开始追踪未来新增消耗（避免把入组前历史老对话算进账单）
+      let offset;
       if (!(key in stateObj.fileOffsets)) {
-        stateObj.fileOffsets[key] = st.size;
-        continue;
+        const startMs = peekConversationStartMs(logPath, st);
+        if (startMs >= installedAtMs - 5000) {
+          // 安装之后新建的对话或子代理：从 0 字节开始完整读取首轮与后续步骤
+          offset = 0;
+          stateObj.fileOffsets[key] = 0;
+        } else {
+          // 安装之前已存在的历史老对话：锚定在当前文件末尾，仅追踪未来新增
+          stateObj.fileOffsets[key] = st.size;
+          continue;
+        }
+      } else {
+        offset = Number(stateObj.fileOffsets[key] || 0);
+        // 刷新 LRU 顺序，避免活跃旧对话被过早淘汰
+        delete stateObj.fileOffsets[key];
+        stateObj.fileOffsets[key] = offset;
       }
+
       if (st.size < offset) offset = 0;
       if (st.size === offset) continue;
 
-      const deltaLen = Math.min(st.size - offset, 4 * 1024 * 1024);
-      const buf = Buffer.allocUnsafe(deltaLen);
       let fd = null;
       try {
         fd = fs.openSync(logPath, "r");
-        const bytesRead = fs.readSync(fd, buf, 0, deltaLen, offset);
-        const text = buf.subarray(0, bytesRead).toString("utf8");
-        const lastNewline = text.lastIndexOf("\n");
-        if (lastNewline < 0) continue; // 等待整行落盘
-        const completeChunk = text.slice(0, lastNewline);
-        const consumedBytes = Buffer.byteLength(completeChunk + "\n", "utf8");
-        stateObj.fileOffsets[key] = offset + consumedBytes;
+        let curPos = offset;
+        let scannedBytes = 0;
+        const chunkBuf = Buffer.allocUnsafe(256 * 1024);
+        let carryChunks = [];
+        let carryLen = 0;
+        let skippingOversized = false;
 
-        for (const line of completeChunk.split(/\r?\n/)) {
-          const ev = extractNumericUsageFromLine(line, convId);
-          if (ev) freshEvents.push(ev);
+        while (curPos < st.size && scannedBytes < MAX_SCAN_BYTES_PER_POLL) {
+          const toRead = Math.min(chunkBuf.length, st.size - curPos, MAX_SCAN_BYTES_PER_POLL - scannedBytes);
+          const bytesRead = fs.readSync(fd, chunkBuf, 0, toRead, curPos);
+          if (bytesRead <= 0) break;
+
+          let sliceStart = 0;
+          for (let i = 0; i < bytesRead; i++) {
+            if (chunkBuf[i] === 0x0a) {
+              const segLen = i - sliceStart;
+              const lineEndPos = curPos + i + 1;
+              if (skippingOversized) {
+                skippingOversized = false;
+                carryChunks = [];
+                carryLen = 0;
+              } else if (carryLen + segLen <= MAX_LINE_BYTES) {
+                const segBuf = Buffer.from(chunkBuf.subarray(sliceStart, i));
+                const fullBuf = carryChunks.length ? Buffer.concat([...carryChunks, segBuf]) : segBuf;
+                const lineStr = fullBuf.toString("utf8").replace(/\r$/, "");
+                const ev = extractNumericUsageFromLine(lineStr, convId);
+                if (ev) freshEvents.push(ev);
+                carryChunks = [];
+                carryLen = 0;
+              } else {
+                carryChunks = [];
+                carryLen = 0;
+              }
+              stateObj.fileOffsets[key] = lineEndPos;
+              sliceStart = i + 1;
+            }
+          }
+
+          if (sliceStart < bytesRead) {
+            const remLen = bytesRead - sliceStart;
+            if (!skippingOversized) {
+              if (carryLen + remLen > MAX_LINE_BYTES) {
+                // 单行超过 4MB：切换跳过模式直到遇到下一个换行符，绝不永久阻塞游标
+                skippingOversized = true;
+                carryChunks = [];
+                carryLen = 0;
+              } else {
+                carryChunks.push(Buffer.from(chunkBuf.subarray(sliceStart, bytesRead)));
+                carryLen += remLen;
+              }
+            }
+          }
+
+          curPos += bytesRead;
+          scannedBytes += bytesRead;
+          if (skippingOversized && curPos < st.size) {
+            // 若在跳过超大行中途达到本次扫描上限，记录进度下次接着跳过
+            stateObj.fileOffsets[key] = curPos;
+          }
         }
       } catch {
         // 忽略并发写读取抖动，下一轮重试
@@ -199,8 +450,8 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
   }
 
   const keys = Object.keys(stateObj.fileOffsets);
-  if (keys.length > 300) {
-    for (const k of keys.slice(0, keys.length - 200)) {
+  if (keys.length > MAX_TRACKED_FILES) {
+    for (const k of keys.slice(0, keys.length - Math.floor(MAX_TRACKED_FILES * 0.8))) {
       delete stateObj.fileOffsets[k];
     }
   }
@@ -282,7 +533,7 @@ export async function fetchLocalQuotaSnapshots(env = process.env) {
   let port = 0;
   try {
     const parsed = new URL(/^[a-z]+:\/\//i.test(rawAddr) ? rawAddr : `http://${rawAddr}`);
-    if (!["127.0.0.1", "localhost", "::1"].includes(parsed.hostname.toLowerCase())) {
+    if (!isLoopbackHost(parsed.hostname)) {
       return { ok: false, reason: "non_loopback_blocked", snapshots: [] };
     }
     host = "127.0.0.1";
@@ -337,14 +588,144 @@ export async function fetchLocalQuotaSnapshots(env = process.env) {
   });
 }
 
+/**
+ * 零依赖 HTTPS POST（支持自动识别 HTTPS_PROXY / HTTP_PROXY 或配置项 proxyUrl 通过 HTTP CONNECT 隧道出网）
+ */
+async function postJsonRequest(endpoint, headers = {}, bodyObj = {}, { proxyUrl = "", timeoutMs = 12000 } = {}) {
+  const target = new URL(endpoint);
+  const rawBody = JSON.stringify(bodyObj);
+  const envProxy =
+    proxyUrl ||
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    "";
+
+  if (!envProxy || isLoopbackHost(target.hostname) || target.protocol !== "https:") {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: rawBody,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  let proxy;
+  try {
+    proxy = new URL(envProxy);
+  } catch {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: rawBody,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  const targetPort = Number(target.port || 443);
+  const proxyPort = Number(proxy.port || (proxy.protocol === "https:" ? 443 : 80));
+  const proxyAuth =
+    proxy.username || proxy.password
+      ? "Basic " + Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString("base64")
+      : "";
+
+  return await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { connectReq.destroy(); } catch {}
+      reject(new Error("经代理连接云端超时"));
+    }, timeoutMs);
+
+    const connectReq = http.request({
+      host: proxy.hostname,
+      port: proxyPort,
+      method: "CONNECT",
+      path: `${target.hostname}:${targetPort}`,
+      headers: {
+        Host: `${target.hostname}:${targetPort}`,
+        ...(proxyAuth ? { "Proxy-Authorization": proxyAuth } : {}),
+      },
+    });
+
+    connectReq.on("connect", (res, socket) => {
+      if (res.statusCode !== 200) {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(new Error(`代理 CONNECT 失败 (HTTP ${res.statusCode})`));
+        return;
+      }
+      const tlsSock = tls.connect({ socket, servername: target.hostname }, () => {
+        const reqLines = [
+          `POST ${target.pathname}${target.search} HTTP/1.1`,
+          `Host: ${target.host}`,
+          `Connection: close`,
+          `Content-Length: ${Buffer.byteLength(rawBody)}`,
+          ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
+          "",
+          "",
+        ].join("\r\n");
+        tlsSock.write(reqLines + rawBody);
+      });
+
+      const chunks = [];
+      tlsSock.on("data", (d) => chunks.push(d));
+      tlsSock.on("end", () => {
+        clearTimeout(timer);
+        try {
+          const full = Buffer.concat(chunks).toString("utf8");
+          const sepIdx = full.indexOf("\r\n\r\n");
+          const headPart = sepIdx >= 0 ? full.slice(0, sepIdx) : full;
+          let bodyPart = sepIdx >= 0 ? full.slice(sepIdx + 4) : "";
+          const statusMatch = headPart.match(/^HTTP\/\d\.\d\s+(\d+)/);
+          const statusCode = statusMatch ? Number(statusMatch[1]) : 500;
+          if (/transfer-encoding:\s*chunked/i.test(headPart)) {
+            let decoded = "";
+            let pos = 0;
+            while (pos < bodyPart.length) {
+              const rn = bodyPart.indexOf("\r\n", pos);
+              if (rn < 0) break;
+              const size = parseInt(bodyPart.slice(pos, rn).trim(), 16);
+              if (!Number.isFinite(size) || size <= 0) break;
+              decoded += bodyPart.slice(rn + 2, rn + 2 + size);
+              pos = rn + 2 + size + 2;
+            }
+            bodyPart = decoded;
+          }
+          const data = bodyPart.trim() ? JSON.parse(bodyPart) : {};
+          resolve({ ok: statusCode >= 200 && statusCode < 300, status: statusCode, data });
+        } catch (err) {
+          reject(err);
+        }
+      });
+      tlsSock.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    connectReq.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    connectReq.end();
+  });
+}
+
 export class MemberLedgerCollector {
   constructor({ configPath, defaultConfigPath, statePath = getDefaultStatePath(), transcriptRoots = null }) {
     this.configPath = configPath;
     this.defaultConfigPath = defaultConfigPath;
     this.statePath = statePath;
     this.transcriptRoots = transcriptRoots;
+    this._configMtimeMs = 0;
+    this._syncInFlight = null;
     this.config = this.loadConfig();
     this.state = readJsonSafe(this.statePath, {
+      installedAtMs: Date.now(),
       fileOffsets: {},
       pendingEvents: [],
       lastSyncAt: null,
@@ -352,6 +733,9 @@ export class MemberLedgerCollector {
       lastMemberView: null,
       lastLocalSnapshots: [],
     });
+    if (!Number.isFinite(Number(this.state.installedAtMs)) || Number(this.state.installedAtMs) <= 0) {
+      this.state.installedAtMs = Date.now();
+    }
     scanIncrementalTranscriptUsage(this.state, this.transcriptRoots);
     this.saveState();
   }
@@ -361,15 +745,36 @@ export class MemberLedgerCollector {
       serverUrl: "",
       memberToken: "",
       memberName: "",
+      proxyUrl: "",
       syncIntervalSec: 90,
+      agreedRules: null,
     });
     const user = readJsonSafe(this.configPath, {});
+    try {
+      this._configMtimeMs = fs.existsSync(this.configPath) ? fs.statSync(this.configPath).mtimeMs : 0;
+    } catch {
+      this._configMtimeMs = 0;
+    }
     return { ...def, ...user };
+  }
+
+  maybeReloadConfig() {
+    try {
+      if (!fs.existsSync(this.configPath)) return false;
+      const mtime = fs.statSync(this.configPath).mtimeMs;
+      if (mtime && mtime !== this._configMtimeMs) {
+        this.config = this.loadConfig();
+        return true;
+      }
+    } catch {}
+    return false;
   }
 
   saveConfig(patch = {}) {
     let nextUrl = patch.serverUrl;
     let nextToken = patch.memberToken;
+    let nextAgreed = patch.agreedRules !== undefined ? patch.agreedRules : this.config.agreedRules;
+
     if (patch.inviteCode !== undefined && String(patch.inviteCode).trim() !== "") {
       const parsed = parseInviteCode(patch.inviteCode);
       if (!parsed.ok) {
@@ -377,22 +782,61 @@ export class MemberLedgerCollector {
       }
       nextUrl = parsed.serverUrl;
       nextToken = parsed.memberToken;
+      nextAgreed = parsed.agreedRules || null;
     } else if (typeof nextUrl === "string" && nextUrl.includes("#agf_")) {
       const parsed = parseInviteCode(nextUrl);
-      if (parsed.ok) {
-        nextUrl = parsed.serverUrl;
-        nextToken = parsed.memberToken;
+      if (!parsed.ok) {
+        throw new Error(parsed.error);
       }
+      nextUrl = parsed.serverUrl;
+      nextToken = parsed.memberToken;
+      if (parsed.agreedRules) nextAgreed = parsed.agreedRules;
+    } else if (typeof nextUrl === "string" && nextUrl.trim()) {
+      const check = parseInviteCode(`${nextUrl.trim().replace(/\/+$/, "")}#agf_check_only`);
+      if (!check.ok) {
+        throw new Error(check.error);
+      }
+      nextUrl = check.serverUrl;
     }
+
+    const nextProxy =
+      patch.proxyUrl !== undefined ? String(patch.proxyUrl || "").trim() : String(this.config.proxyUrl || "").trim();
+    if (nextProxy && !/^https?:\/\//i.test(nextProxy)) {
+      throw new Error("代理地址需以 http:// 或 https:// 开头（例如 http://127.0.0.1:7897）");
+    }
+
     this.config = {
       ...this.config,
       serverUrl: String(nextUrl ?? this.config.serverUrl ?? "").trim().replace(/\/+$/, ""),
       memberToken: String(nextToken ?? this.config.memberToken ?? "").trim(),
       memberName: String(patch.memberName ?? this.config.memberName ?? "").trim(),
+      proxyUrl: nextProxy,
+      agreedRules: nextAgreed || null,
       syncIntervalSec: Math.max(30, Math.min(600, Number(patch.syncIntervalSec ?? this.config.syncIntervalSec) || 90)),
     };
     writeJsonAtomic(this.configPath, this.config);
+    try {
+      this._configMtimeMs = fs.statSync(this.configPath).mtimeMs;
+    } catch {}
     return this.config;
+  }
+
+  unbind() {
+    this.config = {
+      ...this.config,
+      serverUrl: "",
+      memberToken: "",
+      memberName: "",
+      agreedRules: null,
+    };
+    writeJsonAtomic(this.configPath, this.config);
+    try {
+      this._configMtimeMs = fs.statSync(this.configPath).mtimeMs;
+    } catch {}
+    this.state.lastMemberView = null;
+    this.state.lastError = "";
+    this.saveState();
+    return this.getPublicState();
   }
 
   saveState() {
@@ -402,25 +846,86 @@ export class MemberLedgerCollector {
   }
 
   getPublicState() {
+    this.maybeReloadConfig();
+    const mv = this.state.lastMemberView || null;
+    const ruleMismatch = evaluateRuleMismatch(this.config.agreedRules, mv);
     return {
       configured: Boolean(this.config.serverUrl && this.config.memberToken),
       config: {
         serverUrl: this.config.serverUrl || "",
         memberName: this.config.memberName || "",
+        proxyUrl: this.config.proxyUrl || "",
         hasToken: Boolean(this.config.memberToken),
         tokenPreview: this.config.memberToken ? `${this.config.memberToken.slice(0, 8)}••••` : "",
         syncIntervalSec: this.config.syncIntervalSec || 90,
+        agreedRules: this.config.agreedRules || null,
       },
+      ruleMismatch,
       pendingQueueCount: Array.isArray(this.state.pendingEvents) ? this.state.pendingEvents.length : 0,
       lastSyncAt: this.state.lastSyncAt || null,
       lastError: this.state.lastError || "",
       localSnapshots: this.state.lastLocalSnapshots || [],
-      memberView: this.state.lastMemberView || null,
+      memberView: mv,
       clientVersion: CLIENT_VERSION,
     };
   }
 
+  async confirmRules() {
+    this.maybeReloadConfig();
+    if (!this.config.serverUrl || !this.config.memberToken) {
+      throw new Error("尚未连接看板");
+    }
+    const endpoint = `${this.config.serverUrl.replace(/\/+$/, "")}/api/member/confirm-rules`;
+    const mv = this.state.lastMemberView;
+    const targetVer = mv?.pricing?.ruleVersion ?? null;
+
+    const { ok, status, data } = await postJsonRequest(
+      endpoint,
+      {
+        "User-Agent": `AgyFamilyLedger/${CLIENT_VERSION}`,
+        "Content-Type": "application/json",
+        "X-Member-Token": this.config.memberToken,
+      },
+      { ruleVersion: targetVer },
+      { proxyUrl: this.config.proxyUrl, timeoutMs: 12000 }
+    );
+    if (!ok || !data?.ok) {
+      throw new Error(data?.error || `确认规则失败 (HTTP ${status})`);
+    }
+    if (data.member) {
+      this.state.lastMemberView = data.member;
+      const p = data.member.pricing;
+      if (p) {
+        this.saveConfig({
+          agreedRules: {
+            ruleVersion: Number(p.ruleVersion) || 1,
+            ledgerMode: p.ledgerMode === "prepaid" ? "prepaid" : "board_only",
+            geminiFenPerWeeklyPct: Number(p.geminiFenPerWeeklyPct) || 100,
+            thirdPartyFenPerWeeklyPct: Number(p.thirdPartyFenPerWeeklyPct) || 180,
+            agreedAt: new Date().toISOString(),
+            source: "member_confirmed",
+          },
+        });
+      }
+      this.saveState();
+    }
+    return { ok: true, state: this.getPublicState() };
+  }
+
   async syncOnce() {
+    // 并发互斥锁：避免手动点击「同步」与后台定时任务重叠导致重复发包与队列错切
+    if (this._syncInFlight) {
+      return await this._syncInFlight;
+    }
+    this._syncInFlight = this._runSyncOnce().finally(() => {
+      this._syncInFlight = null;
+    });
+    return await this._syncInFlight;
+  }
+
+  async _runSyncOnce() {
+    this.maybeReloadConfig();
+
     const fresh = scanIncrementalTranscriptUsage(this.state, this.transcriptRoots);
     if (!Array.isArray(this.state.pendingEvents)) this.state.pendingEvents = [];
     if (fresh.length > 0) {
@@ -442,45 +947,65 @@ export class MemberLedgerCollector {
     }
 
     if (!this.config.serverUrl || !this.config.memberToken) {
-      this.state.lastError = "尚未填写云端中转网址或成员凭证";
+      this.state.lastError = "尚未填写绑定码";
       this.saveState();
       return { ok: false, reason: "not_configured", state: this.getPublicState() };
     }
 
     const batch = this.state.pendingEvents.slice(0, 200);
+    const batchIds = new Set(batch.map((e) => e.id));
     const endpoint = `${this.config.serverUrl.replace(/\/+$/, "")}/api/member/heartbeat`;
 
     try {
-      const resp = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "User-Agent": "AgyFamilyLedger/1.0",
+      const { ok, status, data } = await postJsonRequest(
+        endpoint,
+        {
+          "User-Agent": `AgyFamilyLedger/${CLIENT_VERSION}`,
           "Content-Type": "application/json",
           "X-Member-Token": this.config.memberToken,
         },
-        body: JSON.stringify({
+        {
           clientVersion: CLIENT_VERSION,
           usageEvents: batch,
           quotaSnapshots: qRes.ok ? qRes.snapshots : [],
-        }),
-        signal: AbortSignal.timeout(12000),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data?.ok) {
-        throw new Error(data?.error || `中转服务返回 HTTP ${resp.status}`);
+        },
+        { proxyUrl: this.config.proxyUrl, timeoutMs: 12000 }
+      );
+      if (!ok || !data?.ok) {
+        throw new Error(data?.error || `中转服务返回 HTTP ${status}`);
       }
-      this.state.pendingEvents = this.state.pendingEvents.slice(batch.length);
+      // 按精确已送达 ID 剔除，绝不误删请求在途期间新采集到的事件
+      this.state.pendingEvents = this.state.pendingEvents.filter((e) => !batchIds.has(e.id));
       this.state.lastSyncAt = new Date().toISOString();
       this.state.lastError = "";
       if (data.member) {
         this.state.lastMemberView = data.member;
+        // 兼容旧版短绑定码：若首次同步时尚未记录 agreedRules，自动锁定入组基线规则
+        if (!this.config.agreedRules && data.member.pricing && data.member.role !== "owner") {
+          const p = data.member.pricing;
+          this.saveConfig({
+            agreedRules: {
+              ruleVersion: Number(data.member.acceptedRuleVersion || p.ruleVersion || 1),
+              ledgerMode: p.ledgerMode === "prepaid" ? "prepaid" : "board_only",
+              geminiFenPerWeeklyPct: Number(p.geminiFenPerWeeklyPct) || 100,
+              thirdPartyFenPerWeeklyPct: Number(p.thirdPartyFenPerWeeklyPct) || 180,
+              agreedAt: new Date().toISOString(),
+              source: "first_sync_snapshot",
+            },
+          });
+        }
       }
       this.saveState();
       return { ok: true, state: this.getPublicState() };
     } catch (err) {
-      this.state.lastError = `同步暂未送达（已暂存本地队列，联网自动补传）：${String(err?.message || err)}`;
+      const rawMsg = String(err?.message || err);
+      const proxyHint =
+        !this.config.proxyUrl && /fetch failed|timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND/i.test(rawMsg)
+          ? "（若使用 *.workers.dev 且未开 TUN，可在「连接配置」中填入本地代理地址或改用自定义域名）"
+          : "";
+      this.state.lastError = `同步暂未送达（已暂存本地队列，联网自动补传）：${rawMsg}${proxyHint}`;
       this.saveState();
-      return { ok: false, reason: err?.message || "sync_failed", state: this.getPublicState() };
+      return { ok: false, reason: rawMsg || "sync_failed", state: this.getPublicState() };
     }
   }
 }

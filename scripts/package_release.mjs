@@ -1,9 +1,14 @@
 /**
- * 官方纯净成员插件自动打包脚本（供 GitHub Actions 与本地检验共用）
+ * 官方纯净成员插件自动打包脚本 (v1.2.0 · 供 GitHub Actions 与本地检验共用)
  *
  * 产出：
- * - dist/agy-family-ledger-plugin-v<version>.zip（不含任何私人网址或成员 Token）
- * - dist/SHA256SUMS.txt（供下载者用 certutil / shasum 核验文件未被篡改）
+ * - dist/agy-family-ledger-plugin-v<version>.zip（不含任何私人网址或成员凭证）
+ *   内含：
+ *   - agy-family-ledger/（纯净插件源码）
+ *   - install_windows.cmd / uninstall_windows.cmd（纯 7-bit ASCII + CRLF）
+ *   - install_macos_linux.sh / uninstall_macos_linux.sh（保留已有 config.json + 自动解析 node 路径）
+ *   - 安装与卸载说明.txt
+ * - dist/SHA256SUMS.txt
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -48,11 +53,19 @@ function copyCleanPlugin(src, dst) {
   }
 }
 
+function assertPureAscii(text, label) {
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 127) {
+      throw new Error(`${label} 包含非 ASCII 字符`);
+    }
+  }
+}
+
 try {
   copyCleanPlugin(path.join(ROOT, "member-plugin"), pluginDst);
 
-  // 纯 7-bit ASCII + CRLF Windows 安装脚本
-  const winCmd =
+  // 1. 纯 7-bit ASCII + CRLF Windows 安装脚本（保留已有 config.json）
+  const winInstallCmd =
     [
       "@echo off",
       "setlocal",
@@ -61,6 +74,10 @@ try {
       "echo ========================================================",
       "echo   AGY Family Ledger Plugin Installer (Official Build)",
       "echo ========================================================",
+      "where node >nul 2>&1",
+      "if errorlevel 1 (",
+      "  echo [WARN] Node.js was not found in PATH. Please install Node.js 20+ before starting Antigravity.",
+      ")",
       'if not exist "%SRC%\\plugin.json" (',
       "  echo [ERROR] Missing agy-family-ledger folder next to this script.",
       "  pause",
@@ -74,47 +91,112 @@ try {
       "  exit /b 1",
       ")",
       "echo [OK] Installed to: %DST%",
-      "echo Restart Antigravity, open the sidebar panel, and paste your binding code.",
+      "echo Next steps:",
+      "echo   1. Restart Antigravity App (requires Sidecar support).",
+      "echo   2. Open Extensions / Custom Plugins and make sure agy-family-ledger is enabled.",
+      "echo   3. Open the right sidebar panel and paste your binding code.",
       "pause",
       "exit /b 0",
     ].join("\r\n") + "\r\n";
 
-  // 校验 100% 7-bit ASCII
-  for (let i = 0; i < winCmd.length; i++) {
-    if (winCmd.charCodeAt(i) > 127) {
-      throw new Error("install_windows.cmd 包含非 ASCII 字符");
-    }
-  }
-  fs.writeFileSync(path.join(bundleDir, "install_windows.cmd"), winCmd, "ascii");
+  assertPureAscii(winInstallCmd, "install_windows.cmd");
+  fs.writeFileSync(path.join(bundleDir, "install_windows.cmd"), winInstallCmd, "ascii");
 
-  const unixSh =
+  // 2. 纯 7-bit ASCII + CRLF Windows 彻底卸载脚本（同步清理插件目录与本地状态文件）
+  const winUninstallCmd =
+    [
+      "@echo off",
+      "setlocal",
+      'set "DST=%USERPROFILE%\\.gemini\\config\\plugins\\agy-family-ledger"',
+      'set "STATE=%USERPROFILE%\\.gemini\\agy-family-ledger-member-state.json"',
+      'set "SIDECAR_DATA=%USERPROFILE%\\.gemini\\antigravity\\sidecar_data\\agy-family-ledger"',
+      "echo ========================================================",
+      "echo   AGY Family Ledger Plugin Uninstaller",
+      "echo ========================================================",
+      'if exist "%DST%" rmdir /S /Q "%DST%"',
+      'if exist "%STATE%" del /F /Q "%STATE%"',
+      'if exist "%SIDECAR_DATA%" rmdir /S /Q "%SIDECAR_DATA%"',
+      "echo [OK] Plugin folder and local state files removed.",
+      "echo Restart Antigravity App to complete removal.",
+      "pause",
+      "exit /b 0",
+    ].join("\r\n") + "\r\n";
+
+  assertPureAscii(winUninstallCmd, "uninstall_windows.cmd");
+  fs.writeFileSync(path.join(bundleDir, "uninstall_windows.cmd"), winUninstallCmd, "ascii");
+
+  // 3. macOS / Linux 安装脚本（保留既有 config.json + 解析真实 node 绝对路径防止 macOS GUI 找不到 node）
+  const unixInstallSh =
     [
       "#!/usr/bin/env bash",
       "set -euo pipefail",
       'DIR="$(cd "$(dirname "$0")" && pwd)"',
       'DST="$HOME/.gemini/config/plugins/agy-family-ledger"',
+      'CFG="$DST/sidecars/ledger/config.json"',
+      'TMP_CFG=""',
+      'if [ -f "$CFG" ]; then',
+      '  TMP_CFG="$(mktemp)"',
+      '  cp "$CFG" "$TMP_CFG"',
+      "fi",
       'mkdir -p "$HOME/.gemini/config/plugins"',
       'rm -rf "$DST"',
       'cp -R "$DIR/agy-family-ledger" "$DST"',
+      'if [ -n "$TMP_CFG" ] && [ -f "$TMP_CFG" ]; then',
+      '  cp "$TMP_CFG" "$CFG"',
+      '  rm -f "$TMP_CFG"',
+      '  echo "[OK] Preserved existing binding config.json"',
+      "fi",
+      'NODE_BIN="$(command -v node || true)"',
+      'if [ -z "$NODE_BIN" ]; then',
+      '  for cand in /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.nvm/versions/node/*/bin/node; do',
+      '    if [ -x "$cand" ]; then NODE_BIN="$cand"; break; fi',
+      "  done",
+      "fi",
+      'if [ -n "$NODE_BIN" ]; then',
+      '  "$NODE_BIN" -e \'const fs=require("fs");const p=process.argv[1];const b=process.argv[2];const j=JSON.parse(fs.readFileSync(p,"utf8"));j.command=b;fs.writeFileSync(p,JSON.stringify(j,null,2)+"\\n");\' "$DST/sidecars/ledger/sidecar.json" "$NODE_BIN"',
+      '  echo "[OK] Bound Node runtime: $NODE_BIN"',
+      "else",
+      '  echo "[WARN] Node.js not found. Please install Node.js 20+ before launching Antigravity."',
+      "fi",
       'echo "[OK] Installed to $DST"',
-      'echo "Restart Antigravity, open the sidebar panel, and paste your binding code."',
+      'echo "1. Restart Antigravity App and enable agy-family-ledger in Extensions."',
+      'echo "2. Open the sidebar panel and paste your binding code."',
     ].join("\n") + "\n";
-  fs.writeFileSync(path.join(bundleDir, "install_macos_linux.sh"), unixSh, "utf8");
+  fs.writeFileSync(path.join(bundleDir, "install_macos_linux.sh"), unixInstallSh, "utf8");
+
+  // 4. macOS / Linux 彻底卸载脚本
+  const unixUninstallSh =
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'rm -rf "$HOME/.gemini/config/plugins/agy-family-ledger"',
+      'rm -f "$HOME/.gemini/agy-family-ledger-member-state.json"',
+      'rm -rf "$HOME/.gemini/antigravity/sidecar_data/agy-family-ledger"',
+      'echo "[OK] Plugin folder and local state files removed. Restart Antigravity App to complete removal."',
+    ].join("\n") + "\n";
+  fs.writeFileSync(path.join(bundleDir, "uninstall_macos_linux.sh"), unixUninstallSh, "utf8");
 
   const readmeTxt = [
     `家庭组额度看板插件（GitHub 官方纯净构建 ${expectedTag}）`,
     "",
     "本压缩包直接由 GitHub Actions 从公开源码自动打包，未包含任何个人网址或成员凭证。",
     "",
-    "安装与连接步骤：",
-    "1. Windows：完整解压本压缩包后，双击运行 install_windows.cmd。",
-    "   macOS / Linux：解压后在终端运行 bash install_macos_linux.sh。",
-    "2. 重启 Antigravity，在右侧边栏打开「家庭组额度看板」。",
-    "3. 将组长发给你的单行纯文本绑定码（格式如 https://域名#agf_xxxx）粘贴进输入框，点击「连接看板」即可。",
+    "使用前提：",
+    "- 需要 Antigravity App（支持侧边栏 Sidecar 扩展）与本机已安装 Node.js 20+。",
     "",
-    "源码核查地址：https://github.com/Curelove/agy-family-ledger",
+    "安装与连接步骤：",
+    "1. Windows：完整解压本压缩包后，双击运行 install_windows.cmd（升级重装不会清除已有绑定）。",
+    "   macOS / Linux：解压后在终端运行 bash install_macos_linux.sh（自动保留绑定并写入本机 node 路径）。",
+    "2. 重启 Antigravity App，在扩展管理页面确认「家庭组额度看板（agy-family-ledger）」已启用。",
+    "3. 在右侧边栏打开「家庭组额度看板」，粘贴组长提供的单行绑定码并点击「连接看板」。",
+    "4. 若使用免费 workers.dev 地址且直连超时，可在「连接配置」中填写本地 HTTP 代理地址（如 http://127.0.0.1:7897）。",
+    "",
+    "彻底卸载：",
+    "- Windows 双击运行 uninstall_windows.cmd，macOS / Linux 运行 bash uninstall_macos_linux.sh，可同步清理插件与本地状态文件。",
+    "",
+    "源码与校验地址：https://github.com/Curelove/agy-family-ledger",
   ].join("\r\n");
-  fs.writeFileSync(path.join(bundleDir, "安装说明.txt"), readmeTxt, "utf8");
+  fs.writeFileSync(path.join(bundleDir, "安装与卸载说明.txt"), readmeTxt, "utf8");
 
   const zipFileName = `agy-family-ledger-plugin-${expectedTag}.zip`;
   const zipFilePath = path.join(distDir, zipFileName);

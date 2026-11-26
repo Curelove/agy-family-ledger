@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const yuan = (fen) => "¥" + ((Number(fen) || 0) / 100).toFixed(2);
 const pct = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(1) + "%" : "--");
+const consoleToken = document.querySelector('meta[name="console-token"]')?.content || "";
 
 let currentDash = null;
 let currentConsoleCfg = null;
@@ -13,7 +14,7 @@ function showToast(msg) {
   el.textContent = msg;
   el.classList.add("show");
   clearTimeout(showToast._t);
-  showToast._t = setTimeout(() => el.classList.remove("show"), 3000);
+  showToast._t = setTimeout(() => el.classList.remove("show"), 3200);
 }
 
 function escapeHtml(s) {
@@ -39,10 +40,12 @@ function fmtReset(iso) {
 }
 
 async function api(url, opts = {}) {
-  const resp = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    ...opts,
-  });
+  const headers = {
+    "Content-Type": "application/json",
+    ...(consoleToken ? { "X-Console-Token": consoleToken } : {}),
+    ...(opts.headers || {}),
+  };
+  const resp = await fetch(url, { ...opts, headers });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || data?.ok === false) {
     throw new Error(data?.error || `请求失败 (${resp.status})`);
@@ -68,24 +71,31 @@ function renderMemberList(members) {
     .map((m) => {
       const isOpen = expandedMemberIds.has(m.id);
       const isOwner = m.role === "owner";
+      const isPaused = m.status === "paused";
+      const isArchived = m.status === "archived";
       const gPct = (m.week?.geminiPct || 0).toFixed(1);
       const pPct = (m.week?.thirdPartyPct || 0).toFixed(1);
+      const h5G = Number(m.recent5h?.geminiSharePct || 0);
+      const h5P = Number(m.recent5h?.thirdPartySharePct || 0);
       const weekTotalCost = (m.week?.geminiChargeFen || 0) + (m.week?.thirdPartyChargeFen || 0);
-      const lowCls = prepaid && !isOwner && m.isLowBalance ? "low-bal" : "";
+      const lowCls = prepaid && !isOwner && !isArchived && m.isLowBalance ? "low-bal" : "";
+      const archCls = isArchived ? "archived" : "";
 
       let rightMetricHtml = "";
       if (prepaid) {
         rightMetricHtml = isOwner
           ? `<div class="balance-amt">Gemini ${gPct}% · 3P ${pPct}%</div><div class="balance-cap">组长免计费</div>`
-          : `<div class="balance-amt ${m.isLowBalance ? "low" : ""}">${yuan(m.balanceFen)}</div><div class="balance-cap">近 7 天 ${yuan(weekTotalCost)}</div>`;
+          : `<div class="balance-amt ${m.isLowBalance ? "low" : ""}">${yuan(m.balanceFen)}</div><div class="balance-cap">本周期 ${yuan(weekTotalCost)}</div>`;
       } else {
-        rightMetricHtml = `<div class="balance-amt">Gemini ${gPct}% · 3P ${pPct}%</div><div class="balance-cap">近 7 天用量占比</div>`;
+        rightMetricHtml = `<div class="balance-amt">Gemini ${gPct}% · 3P ${pPct}%</div><div class="balance-cap">本周期用量</div>`;
       }
 
       // 单行按钮严格控制在 <= 2 个
       let quickOpsHtml = "";
       if (isOwner) {
         quickOpsHtml = `<button class="btn-soft" data-op="install-owner">装到本机</button>`;
+      } else if (isArchived) {
+        quickOpsHtml = `<span class="role-tag muted">已停用归档</span>`;
       } else if (prepaid) {
         quickOpsHtml = `
           <button class="btn-soft" data-op="topup" data-id="${escapeHtml(m.id)}">记录余额</button>
@@ -95,15 +105,25 @@ function renderMemberList(members) {
         quickOpsHtml = `<button class="btn-soft" data-op="invite" data-id="${escapeHtml(m.id)}">邀请绑定</button>`;
       }
 
+      const tags = [];
+      if (isOwner) tags.push('<span class="role-tag">组长</span>');
+      if (isPaused) tags.push('<span class="role-tag warn">已暂停</span>');
+      if (!isArchived && m.needsRuleConfirm) tags.push('<span class="role-tag warn">待确认新规则</span>');
+
+      const h5Desc =
+        h5G > 0 || h5P > 0
+          ? `Gemini ${h5G.toFixed(0)}% · 3P ${h5P.toFixed(0)}%（${m.recent5h?.requests5h || 0} 次）`
+          : "近 5 小时暂无记录";
+
       return `
-        <article class="member-card ${lowCls} ${isOpen ? "open" : ""}" data-member-id="${escapeHtml(m.id)}">
+        <article class="member-card ${lowCls} ${archCls} ${isOpen ? "open" : ""}" data-member-id="${escapeHtml(m.id)}">
           <div class="member-row" data-toggle-member="${escapeHtml(m.id)}">
             <div class="member-left">
               <span class="presence-dot ${m.online ? "on" : ""}" title="${m.online ? "插件在线" : "未在线"}"></span>
               <div class="member-ident">
                 <div class="member-name-line">
                   <span>${escapeHtml(m.name)}</span>
-                  ${isOwner ? '<span class="role-tag">组长</span>' : ""}
+                  ${tags.join("")}
                 </div>
                 <div class="member-sub">
                   最近同步：${fmtTime(m.lastSeenAt)}${m.note ? " · " + escapeHtml(m.note) : ""}
@@ -119,23 +139,25 @@ function renderMemberList(members) {
           <div class="member-drawer">
             <div class="drawer-grid">
               <div class="drawer-cell">
-                <div class="dk">近 7 天 Gemini 占比</div>
+                <div class="dk">本周期 Gemini 用量</div>
                 <div class="dv">${gPct}%${prepaid && !isOwner ? "（" + yuan(m.week?.geminiChargeFen) + "）" : ""}</div>
               </div>
               <div class="drawer-cell">
-                <div class="dk">近 7 天 Claude 3P 占比</div>
+                <div class="dk">本周期 Claude 3P 用量</div>
                 <div class="dv">${pPct}%${prepaid && !isOwner ? "（" + yuan(m.week?.thirdPartyChargeFen) + "）" : ""}</div>
               </div>
               <div class="drawer-cell">
-                <div class="dk">近 7 天请求 / Token</div>
-                <div class="dv">${m.requests7d || 0} 次 · ${((m.tokens7d || 0) / 10000).toFixed(1)} 万</div>
+                <div class="dk">近 5 小时活跃参考</div>
+                <div class="dv">${h5Desc}</div>
               </div>
             </div>
             <div class="drawer-token-bar">
-              <span class="token-code">成员凭证：${escapeHtml(m.memberToken.slice(0, 10))}••••</span>
+              <span class="token-code">规则已确认 v${Number(m.acceptedRuleVersion || 1)} · 近 7 天 ${m.requests7d || 0} 次请求</span>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <button class="btn-soft" data-op="invite" data-id="${escapeHtml(m.id)}">查看完整绑定码</button>
-                ${!isOwner ? `<button class="btn-danger-soft" data-op="delete" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">删除成员</button>` : ""}
+                ${!isArchived ? `<button class="btn-soft" data-op="invite" data-id="${escapeHtml(m.id)}">查看绑定码</button>` : ""}
+                ${!isOwner && !isArchived ? `<button class="btn-soft" data-op="toggle-pause" data-id="${escapeHtml(m.id)}" data-paused="${isPaused ? "1" : "0"}">${isPaused ? "恢复同步" : "暂停同步"}</button>` : ""}
+                ${!isOwner && !isArchived ? `<button class="btn-soft" data-op="rotate-token" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">重置绑定码</button>` : ""}
+                ${!isOwner && !isArchived ? `<button class="btn-danger-soft" data-op="delete" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">停用移除</button>` : ""}
               </div>
             </div>
           </div>
@@ -212,6 +234,26 @@ function renderTxTable(txs) {
     .join("");
 }
 
+function renderRuleChanges(list) {
+  const box = $("rule-history-box");
+  const el = $("rule-history-list");
+  if (!list || list.length === 0) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  el.innerHTML = list
+    .slice(0, 6)
+    .map(
+      (r) => `
+      <div class="rule-history-item">
+        <div><strong>v${Number(r.rule_version)}</strong> · ${escapeHtml(r.next_summary)}</div>
+        <div class="rule-history-meta">${fmtTime(r.created_at)} · 原为：${escapeHtml(r.prev_summary)}</div>
+      </div>`
+    )
+    .join("");
+}
+
 function renderAlerts(alerts) {
   const el = $("alert-list");
   if (!alerts || alerts.length === 0) {
@@ -275,15 +317,15 @@ function applyDashboard(dash) {
   const sum = dash.summary || {};
   $("kpi-online").textContent = `${sum.onlineCount || 0} / ${sum.memberCount || 0}`;
   if (prepaid) {
-    $("kpi-col2-label").textContent = "近 7 天合计扣费";
+    $("kpi-col2-label").textContent = "本周期合计扣费";
     $("kpi-col2-val").textContent = yuan(sum.totalWeekChargeFen || 0);
     $("kpi-col3-label").textContent = "累计收到预存";
     $("kpi-col3-val").textContent = yuan(sum.totalTopupFen || 0);
     $("kpi-col3-val").className = "kpi-value positive";
   } else {
-    $("kpi-col2-label").textContent = "近 7 天 Gemini 已用";
+    $("kpi-col2-label").textContent = "本周期 Gemini 已用";
     $("kpi-col2-val").textContent = Number(sum.totalWeekGeminiPct || 0).toFixed(1) + "%";
-    $("kpi-col3-label").textContent = "近 7 天 Claude 已用";
+    $("kpi-col3-label").textContent = "本周期 Claude 已用";
     $("kpi-col3-val").textContent = Number(sum.totalWeekThirdPartyPct || 0).toFixed(1) + "%";
     $("kpi-col3-val").className = "kpi-value";
   }
@@ -302,6 +344,7 @@ function applyDashboard(dash) {
   renderActivityFeed(dash);
   if (prepaid) renderTxTable(dash.recentTransactions || []);
   renderAlerts(dash.alerts || []);
+  renderRuleChanges(dash.ruleChanges || []);
 
   // 回填设置页
   $("set-family-name").value = s.family_name || "";
@@ -327,12 +370,15 @@ function applyConsoleConfig(cfg) {
   badge.className = "status-stamp" + (isCloud ? " cloud" : "");
   $("btn-demo-seed").hidden = isCloud;
 
+  $("owner-sync-warn").hidden = !Boolean(cfg.ownerPluginNeedsSync);
+  if (cfg.ownerPluginNeedsSync) {
+    $("owner-old-url").textContent = cfg.ownerPluginServerUrl || "旧地址";
+  }
+
   for (const r of document.querySelectorAll('input[name="console-mode"]')) {
     r.checked = r.value === cfg.mode;
   }
   $("cfg-worker-url").value = cfg.cloudWorkerUrl || "";
-  $("local-push-row").hidden = !(cfg.hasLocalPushConfig || cfg.enableQqAlertForward);
-  $("cfg-qq-forward").checked = Boolean(cfg.enableQqAlertForward);
   syncSettingsFormVisibility();
 }
 
@@ -352,8 +398,9 @@ async function openInviteModal(memberId) {
     const info = await api(`/api/invite-info/${encodeURIComponent(memberId)}`);
     activeInviteInfo = info;
     $("inv-member-name").textContent = info.memberName;
-    $("inv-market-cmd").textContent = info.marketCmd;
+    $("inv-releases-url").textContent = info.releasesUrl;
     $("inv-code-text").textContent = info.inviteCode;
+    $("inv-terms-summary").textContent = info.termsSummary || "纯看板模式";
     $("inv-releases-link").href = info.releasesUrl;
     $("invite-local-warn").hidden = !info.isLocalOnly;
     $("modal-invite").hidden = false;
@@ -364,12 +411,11 @@ async function openInviteModal(memberId) {
 
 function buildPlainInviteMessage(info) {
   return [
-    `家庭组额度看板插件已公开在 GitHub，直接从官方仓库安装即可（不用传压缩包）：`,
-    `仓库与安装说明：${info.repoUrl}`,
-    `如已安装 AGY Market，可直接运行：${info.marketCmd}`,
-    `也可在 Releases 下载自动打包版：${info.releasesUrl}`,
-    ``,
-    `装好后打开 Antigravity 右侧边栏「家庭组额度看板」，粘贴下面这一行绑定码即可连接：`,
+    `家庭组额度看板插件已公开在 GitHub，直接从官方页面下载安装即可（无需接收私人压缩包）：`,
+    `1. 官方构建包下载与 SHA-256 核验：${info.releasesUrl}`,
+    `   公开源码仓库：${info.repoUrl}`,
+    `2. 解压后运行对应系统的安装脚本（Windows 运行 install_windows.cmd，macOS / Linux 运行 bash install_macos_linux.sh），重启 Antigravity App 并在扩展设置中确认启用。`,
+    `3. 打开右侧边栏「家庭组额度看板」，粘贴下方纯文本绑定码即可连接（已锁定当前规则：${info.termsSummary}）：`,
     info.inviteCode,
   ].join("\n");
 }
@@ -402,7 +448,7 @@ document.addEventListener("click", async (e) => {
   const ackBtn = e.target.closest("[data-ack-alert]");
   if (ackBtn) {
     try {
-      await api(`/api/admin/alerts/${encodeURIComponent(ackBtn.dataset.ackAlert)}/ack`, { method: "POST" });
+      await api(`/api/admin/alerts/${encodeURIComponent(ackBtn.dataset.ackAlert)}/ack`, { method: "POST", body: "{}" });
       showToast("已标记为已读");
       await refreshAll();
     } catch (err) {
@@ -429,11 +475,36 @@ document.addEventListener("click", async (e) => {
       $("topup-yuan").value = "10";
       $("topup-note").value = "补充预存余额";
       $("modal-topup").hidden = false;
-    } else if (op === "delete") {
-      if (!confirm(`确认从看板中删除「${opBtn.dataset.name}」吗？（不会影响 Google 家庭组本身）`)) return;
+    } else if (op === "toggle-pause") {
+      const currentlyPaused = opBtn.dataset.paused === "1";
       try {
-        await api(`/api/admin/members/${encodeURIComponent(id)}`, { method: "DELETE" });
-        showToast("已删除该成员");
+        await api(`/api/admin/members/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: currentlyPaused ? "active" : "paused" }),
+        });
+        showToast(currentlyPaused ? "已恢复该成员同步" : "已暂停该成员同步");
+        await refreshAll();
+      } catch (err) {
+        showToast(err.message);
+      }
+    } else if (op === "rotate-token") {
+      if (!confirm(`确认重置「${opBtn.dataset.name}」的绑定码吗？重置后原绑定码立即失效，需要将新绑定码发给对方。`)) return;
+      try {
+        await api(`/api/admin/members/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ rotateToken: true }),
+        });
+        showToast("已生成新绑定码，旧凭证已失效");
+        await refreshAll();
+        await openInviteModal(id);
+      } catch (err) {
+        showToast(err.message);
+      }
+    } else if (op === "delete") {
+      if (!confirm(`确认停用或移除「${opBtn.dataset.name}」吗？若该成员已有历史记录，系统会自动停用其绑定码并保留历史总账。`)) return;
+      try {
+        const res = await api(`/api/admin/members/${encodeURIComponent(id)}`, { method: "DELETE" });
+        showToast(res.message || "已处理该成员");
         await refreshAll();
       } catch (err) {
         showToast(err.message);
@@ -492,10 +563,10 @@ $("btn-confirm-add-member").addEventListener("click", async () => {
   }
 });
 
-$("btn-copy-market-cmd").addEventListener("click", async () => {
+$("btn-copy-releases-url").addEventListener("click", async () => {
   if (!activeInviteInfo) return;
-  await navigator.clipboard?.writeText(activeInviteInfo.marketCmd).catch(() => {});
-  showToast("已复制安装命令");
+  await navigator.clipboard?.writeText(activeInviteInfo.releasesUrl).catch(() => {});
+  showToast("已复制 GitHub Releases 下载页链接");
 });
 
 $("btn-copy-code-only").addEventListener("click", async () => {
@@ -566,7 +637,6 @@ $("btn-save-console-cfg").addEventListener("click", async () => {
         mode,
         cloudWorkerUrl: $("cfg-worker-url").value.trim(),
         adminSecret: $("cfg-admin-secret").value.trim(),
-        enableQqAlertForward: $("cfg-qq-forward").checked,
       }),
     });
     $("cfg-admin-secret").value = "";
@@ -579,8 +649,9 @@ $("btn-save-console-cfg").addEventListener("click", async () => {
 
 async function handleInstallOwner() {
   try {
-    const out = await api("/api/install-owner-local", { method: "POST" });
+    const out = await api("/api/install-owner-local", { method: "POST", body: "{}" });
     showToast(`组长插件已同步到本机（${out.memberName}）`);
+    await refreshAll();
   } catch (err) {
     showToast("安装失败：" + err.message);
   }
@@ -591,7 +662,7 @@ $("btn-refresh").addEventListener("click", refreshAll);
 
 $("btn-demo-seed").addEventListener("click", async () => {
   try {
-    const out = await api("/api/demo/seed", { method: "POST" });
+    const out = await api("/api/demo/seed", { method: "POST", body: "{}" });
     showToast(out.message || "已填充示例数据");
     await refreshAll();
   } catch (err) {
@@ -600,3 +671,4 @@ $("btn-demo-seed").addEventListener("click", async () => {
 });
 
 refreshAll();
+setInterval(refreshAll, 45000);

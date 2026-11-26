@@ -56,6 +56,10 @@
     <main class="ledger-page">
       <!-- 视图 1：看板总览 -->
       <section class="tab-view active" id="view-overview">
+        <div class="local-warn-box" id="owner-sync-warn" style="margin-bottom:16px;" hidden>
+          <span>检测到本机已安装的组长插件当前指向（<strong id="owner-old-url">--</strong>），与当前管理台存储位置不一致。若需同步切换，请点击下方组长行右侧的「装到本机」更新配置，无需重启即可生效。</span>
+        </div>
+
         <div class="waterline-band">
           <div class="pool-meter">
             <div class="meter-head">
@@ -108,11 +112,11 @@
             <div class="kpi-value" id="kpi-online">0 / 0</div>
           </div>
           <div class="kpi-item">
-            <div class="kpi-label" id="kpi-col2-label">近 7 天 Gemini 已用</div>
+            <div class="kpi-label" id="kpi-col2-label">本周期 Gemini 已用</div>
             <div class="kpi-value" id="kpi-col2-val">0.0%</div>
           </div>
           <div class="kpi-item">
-            <div class="kpi-label" id="kpi-col3-label">近 7 天 Claude 已用</div>
+            <div class="kpi-label" id="kpi-col3-label">本周期 Claude 已用</div>
             <div class="kpi-value" id="kpi-col3-val">0.0%</div>
           </div>
           <div class="kpi-item">
@@ -126,7 +130,7 @@
             <div class="section-bar">
               <div>
                 <h2>家庭组成员</h2>
-                <p class="section-desc">点击成员行可展开详细统计；点击「邀请绑定」可复制 GitHub 安装方式与纯文本绑定码。</p>
+                <p class="section-desc">按当前周重置周期汇总用量；点击成员行可展开近 5 小时活跃度与状态管理。</p>
               </div>
             </div>
             <div class="member-list" id="member-list"></div>
@@ -167,13 +171,13 @@
         <div class="rule-callout">
           <div class="rule-callout-title">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
-            <span>异常掉量检测说明</span>
+            <span>未统计消耗检测说明</span>
           </div>
-          <p>系统只比对「官方剩余额度减少量」与「全组插件上报的消耗总和」。小于 3% 的单次波动会自动忽略；当持续出现明显未匹配的额度下降时，会在此记录差值，便于在群内核对是否有人更换了未安装插件的设备或开启了第三方转发服务。</p>
+          <p>系统按滚动时间窗口累计比对「官方剩余额度减少量」与「全组插件上报的合理可解释消耗」。当单次或持续累计出现明显未匹配的额度下降时，会在此记录差值，方便在群内确认是否有人在未安装插件的设备、命令行或第三方转发服务中使用了账号。</p>
         </div>
 
         <div class="section-bar" style="margin-top:18px;">
-          <h2>提醒与配额重置记录</h2>
+          <h2>提醒、规则变更与配额重置记录</h2>
         </div>
         <div class="alert-list" id="alert-list"></div>
       </section>
@@ -189,20 +193,20 @@
             </div>
 
             <div class="form-field">
-              <label>记账方式</label>
+              <label>记账方式（每次变动会自动记录版本，需成员在侧边栏确认后才按新单价扣费）</label>
               <div class="choice-rail" role="radiogroup" aria-label="记账方式">
                 <label class="choice-item">
                   <input type="radio" name="ledger-mode" value="board_only" checked/>
                   <div>
                     <div class="choice-title">纯看板模式（默认推荐）</div>
-                    <div class="choice-sub">只展示全组剩余额度与成员用量占比，不显示余额和金额。</div>
+                    <div class="choice-sub">只展示全组剩余额度、近 5 小时活跃度与本周期成员用量，不显示余额和金额。</div>
                   </div>
                 </label>
                 <label class="choice-item">
                   <input type="radio" name="ledger-mode" value="prepaid"/>
                   <div>
                     <div class="choice-title">按量记账模式</div>
-                    <div class="choice-sub">启用成员预存余额、按消耗比例折算扣费与低余额提醒。</div>
+                    <div class="choice-sub">启用成员预存余额、按消耗比例折算扣费、成员端透明对账明细与变价确认。</div>
                   </div>
                 </label>
               </div>
@@ -232,24 +236,29 @@
 
             <div class="toggle-row">
               <div>
-                <div class="toggle-title">向组内成员公开各人用量占比</div>
-                <div class="toggle-sub">成员侧边栏可查看全组每个人的近 7 天用量百分比（不含任何余额或密钥），方便大家错峰使用。</div>
+                <div class="toggle-title">向组内成员公开各人本周期与近 5 小时用量</div>
+                <div class="toggle-sub">成员侧边栏可查看全组每个人的本周期占比与近 5 小时活跃度（不含任何余额或密钥），方便大家错峰使用。</div>
               </div>
               <input type="checkbox" id="set-show-peers" class="switch" checked/>
             </div>
 
             <div class="field-pair">
               <div class="form-field">
-                <label for="set-warn-pct">普通提醒阈值（15 分钟未统计掉量 %）</label>
+                <label for="set-warn-pct">普通提醒阈值（滚动累计未统计掉量 %）</label>
                 <input id="set-warn-pct" type="number" step="0.5" min="2" max="50"/>
               </div>
               <div class="form-field">
-                <label for="set-crit-pct">严重提醒阈值（全员在线未统计掉量 %）</label>
+                <label for="set-crit-pct">严重提醒阈值（全员在线累计掉量 %）</label>
                 <input id="set-crit-pct" type="number" step="1" min="5" max="80"/>
               </div>
             </div>
 
             <button class="btn-ink" id="btn-save-settings">保存看板规则</button>
+
+            <div id="rule-history-box" style="margin-top:16px;" hidden>
+              <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;">规则变更记录（全体成员可见）</div>
+              <div class="rule-history-list" id="rule-history-list"></div>
+            </div>
           </div>
 
           <div class="settings-panel">
@@ -280,14 +289,6 @@
                 <label for="cfg-admin-secret">管理员密钥（ADMIN_SECRET，留空则保持原值）</label>
                 <input id="cfg-admin-secret" type="password" placeholder="部署 Worker 时设置的管理员密码"/>
               </div>
-            </div>
-
-            <div class="toggle-row" id="local-push-row" style="margin-top:12px;" hidden>
-              <div>
-                <div class="toggle-title">将异常提醒转发至本地私聊脚本</div>
-                <div class="toggle-sub">已检测到本地推送配置，开启后新提醒会自动私发给组长本人。</div>
-              </div>
-              <input type="checkbox" id="cfg-qq-forward" class="switch"/>
             </div>
 
             <div class="btn-pair" style="margin-top:14px;">
@@ -336,7 +337,7 @@
     </div>
   </div>
 
-  <!-- 弹窗：邀请成员绑定（零私包，GitHub 官方源 + 纯文本绑定码） -->
+  <!-- 弹窗：邀请成员绑定（零私包，官方 GitHub Releases + 含初始约定的纯文本绑定码） -->
   <div class="modal-backdrop" id="modal-invite" hidden>
     <div class="modal-card modal-wide" role="dialog" aria-modal="true" aria-labelledby="modal-invite-title">
       <div class="modal-head">
@@ -351,20 +352,22 @@
         </div>
 
         <div class="invite-step">
-          <div class="step-title">1. 让朋友自行从 GitHub 官方公开仓库安装插件（无需发送私人压缩包）</div>
-          <div class="step-sub">已安装 AGY Market 的朋友可直接执行下方命令；也可自行前往 GitHub Releases 下载自动构建的插件包：</div>
+          <div class="step-title">1. 让朋友自行从 GitHub 官方公开页面安装插件（无需私发压缩包）</div>
+          <div class="step-sub">推荐前往 GitHub Releases 下载自动构建的插件包并核对 SHA-256，或直接克隆公开源码仓库：</div>
           <div class="code-copy-row">
-            <code id="inv-market-cmd">npx agy-market add https://github.com/Curelove/agy-family-ledger/tree/main/member-plugin</code>
-            <button class="btn-soft" id="btn-copy-market-cmd">复制命令</button>
+            <code id="inv-releases-url">https://github.com/Curelove/agy-family-ledger/releases/latest</code>
+            <button class="btn-soft" id="btn-copy-releases-url">复制下载页</button>
           </div>
           <div style="margin-top:6px;">
-            <a class="ext-link" id="inv-releases-link" href="https://github.com/Curelove/agy-family-ledger/releases/latest" target="_blank" rel="noopener">查看 GitHub Releases 官方下载页与源码 ↗</a>
+            <a class="ext-link" id="inv-releases-link" href="https://github.com/Curelove/agy-family-ledger/releases/latest" target="_blank" rel="noopener">打开 GitHub Releases 与公开源码 ↗</a>
           </div>
         </div>
 
         <div class="invite-step" style="margin-top:14px;margin-bottom:0;">
           <div class="step-title">2. 将下方纯文本绑定码发给「<span id="inv-member-name">--</span>」</div>
-          <div class="step-sub">朋友打开 Antigravity 侧边栏「家庭组额度看板」，粘贴这一行文本即可完成连接：</div>
+          <div class="step-sub">
+            绑定码内已锁定当前规则（<strong id="inv-terms-summary">--</strong>）。日后若更改规则，成员侧边栏会明显提示并需本人确认后生效：
+          </div>
           <div class="code-copy-row">
             <code id="inv-code-text">--</code>
             <button class="btn-soft" id="btn-copy-code-only">仅复制绑定码</button>

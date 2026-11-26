@@ -60,6 +60,8 @@
   button:hover { background: var(--well); border-color: #C9BDAA; }
   button.primary { background: var(--ink); color: #FAF7F2; border-color: var(--ink); width: 100%; padding: 7px 12px; }
   button.primary:hover { background: #3A332E; }
+  button.danger-soft { background: var(--vermilion-soft); color: #8F3022; border-color: #EBC0B8; }
+  button.danger-soft:hover { background: #F7D9D3; }
 
   .banner {
     border-radius: 10px; padding: 9px 11px; margin-bottom: 12px;
@@ -68,6 +70,27 @@
   .banner.show { display: flex; }
   .banner.warn { background: var(--amber-soft); color: #7C4B1F; border: 1px solid #E8CFAF; }
   .banner.err { background: var(--vermilion-soft); color: #8F3022; border: 1px solid #EBC0B8; }
+
+  .rule-alert-card {
+    background: var(--amber-soft);
+    border: 1px solid #E2BE92;
+    border-radius: 12px;
+    padding: 12px 13px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #6B3F16;
+  }
+  .rule-alert-title { font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #542F0D; }
+  .rule-diff-row {
+    background: rgba(255, 253, 249, 0.78);
+    border: 1px solid #EAD2B5;
+    border-radius: 8px;
+    padding: 7px 9px;
+    margin: 6px 0 9px;
+    line-height: 1.55;
+  }
+  .rule-btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .rule-btn-row button { flex: 1; min-width: 110px; }
 
   .sheet {
     background: var(--card); border: 1px solid var(--border);
@@ -119,7 +142,7 @@
 
   .peer-list { margin-top: 8px; display: flex; flex-direction: column; }
   .peer-row {
-    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
     padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 12px;
   }
   .peer-row:last-child { border-bottom: none; padding-bottom: 0; }
@@ -128,7 +151,9 @@
     font-size: 12px; padding: 0 5px; border-radius: 4px;
     background: var(--paper); color: var(--muted); font-weight: 500;
   }
+  .peer-right { text-align: right; }
   .peer-nums { font-variant-numeric: tabular-nums; color: var(--ink-soft); white-space: nowrap; }
+  .peer-5h { font-size: 12px; color: var(--muted); margin-top: 1px; font-variant-numeric: tabular-nums; }
 
   details { margin-bottom: 10px; }
   details > summary {
@@ -148,8 +173,10 @@
     padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 12px;
   }
   .tx-row:last-child { border-bottom: none; }
-  .tx-pos { color: var(--ok); font-weight: 700; font-variant-numeric: tabular-nums; }
-  .tx-neg { color: var(--vermilion); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tx-pos { color: var(--ok); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tx-neg { color: var(--vermilion); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .sub-list-title { font-size: 12px; color: var(--muted); font-weight: 700; margin: 10px 0 4px; }
+  .sub-list-title:first-child { margin-top: 0; }
 
   .field { margin-bottom: 10px; }
   .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
@@ -184,6 +211,20 @@
     </button>
   </div>
 
+  <!-- 规则或单价变动确认提醒（防组长静默改价） -->
+  <section class="rule-alert-card" id="rule-change-card" hidden>
+    <div class="rule-alert-title">看板计费规则已更新，需要你确认</div>
+    <div>在你点击确认前，系统不会按新单价自动扣费。</div>
+    <div class="rule-diff-row">
+      <div>原约定：<strong id="rule-diff-old">--</strong></div>
+      <div>云端新规则：<strong id="rule-diff-new">--</strong></div>
+    </div>
+    <div class="rule-btn-row">
+      <button class="primary" id="btn-confirm-rules">确认接受新规则</button>
+      <button class="danger-soft" id="btn-unbind-reject">暂不接受并断开</button>
+    </div>
+  </section>
+
   <div class="banner warn" id="banner-low">
     <span id="banner-low-text"></span>
   </div>
@@ -196,9 +237,9 @@
     <div class="sheet-head" style="margin-bottom:6px;">
       <span class="label">连接家庭组看板</span>
     </div>
-    <p class="hint-line">将组长发给你的那一行纯文本绑定码粘贴到下方即可完成连接。</p>
+    <p class="hint-line">将组长发给你的那一行纯文本绑定码粘贴到下方即可完成连接（绑定码内含当前约定规则）。</p>
     <div class="field">
-      <input id="inp-onboard-code" placeholder="https://agy-family-ledger.xxxx.workers.dev#agf_xxxx"/>
+      <input id="inp-onboard-code" placeholder="https://agy-family-ledger.xxxx.workers.dev#agf_xxxx..."/>
     </div>
     <button class="primary" id="btn-bind-onboard">连接看板</button>
   </section>
@@ -234,20 +275,20 @@
     </div>
   </section>
 
-  <!-- 我的近 7 天用量（仅在组长开启按量记账时才附带余额） -->
+  <!-- 我的本周期用量（按当前周重置周期计算，重置后自动归零） -->
   <section class="sheet" id="my-usage-card">
     <div class="sheet-head">
-      <span class="label">我近 7 天的用量占比</span>
+      <span class="label">我本周期的用量</span>
       <span style="font-size:12px;color:var(--muted);">待传记录 <strong id="queue-count">0</strong></span>
     </div>
     <div class="week-grid">
       <div class="stat-cell">
-        <div class="k">Gemini 周池占比</div>
+        <div class="k">Gemini 本周期</div>
         <div class="v" id="my-gem-pct">0.00%</div>
         <div class="s" id="my-gem-cost" hidden></div>
       </div>
       <div class="stat-cell">
-        <div class="k">Claude 3P 占比</div>
+        <div class="k">Claude 3P 本周期</div>
         <div class="v" id="my-3p-pct">0.00%</div>
         <div class="s" id="my-3p-cost" hidden></div>
       </div>
@@ -261,16 +302,19 @@
     </div>
   </section>
 
-  <!-- 全组成员近 7 天透明占比（方便错峰使用） -->
+  <!-- 全组成员本周期用量与近 5 小时活跃度 -->
   <section class="sheet" id="peers-card" hidden>
-    <div class="label">组内成员近 7 天占比</div>
+    <div class="sheet-head">
+      <span class="label">组内成员本周期用量</span>
+      <span style="font-size:12px;color:var(--muted);">含近 5 小时活跃参考</span>
+    </div>
     <div class="peer-list" id="peer-list"></div>
   </section>
 
-  <!-- 仅在按量记账模式下显示的充值记录 -->
+  <!-- 仅在按量记账模式下显示：分摊扣费明细 + 充值记录 + 规则变更记录 -->
   <details id="tx-details" hidden>
     <summary>
-      <span>余额变动记录</span>
+      <span>扣费与余额明细</span>
       <span style="color:var(--muted);font-weight:400;" id="tx-count">0 条</span>
     </summary>
     <div class="details-body" id="tx-list">
@@ -286,16 +330,23 @@
     </summary>
     <div class="details-body">
       <div class="field">
-        <label for="inp-invite">粘贴单行绑定码（推荐）</label>
-        <input id="inp-invite" placeholder="https://agy-family-ledger.xxxx.workers.dev#agf_xxxx"/>
+        <label for="inp-invite">更换单行绑定码</label>
+        <input id="inp-invite" placeholder="https://agy-family-ledger.xxxx.workers.dev#agf_xxxx..."/>
       </div>
-      <button class="primary" id="btn-save-invite">保存绑定码并同步</button>
+      <div class="field">
+        <label for="inp-proxy">HTTP 代理地址（选填，直连超时时填写）</label>
+        <input id="inp-proxy" placeholder="例如 http://127.0.0.1:7897，留空则直连"/>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="primary" id="btn-save-invite" style="flex:1;">保存并同步</button>
+        <button class="danger-soft" id="btn-unbind-cfg">断开</button>
+      </div>
     </div>
   </details>
 
   <div class="privacy-note">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
-    <span>数据说明：插件仅统计本地对话日志中的纯数字 Token 计数与官方剩余配额百分比，不读取任何代码、对话正文、本机进程或代理配置。</span>
+    <span>数据说明：插件仅上报本地对话步骤的纯数字 Token 计数、模型名、时间戳、在线心跳与官方剩余配额百分比，不读取任何代码、对话正文、思考过程或本机进程。</span>
   </div>
 </div>
 
@@ -303,6 +354,13 @@
 const $ = (id) => document.getElementById(id);
 const yuan = (fen) => "¥" + ((Number(fen) || 0) / 100).toFixed(2);
 const pctText = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(1) + "%" : "--");
+const panelToken = document.querySelector('meta[name="panel-token"]')?.content || "";
+
+function postHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (panelToken) h["X-Panel-Token"] = panelToken;
+  return h;
+}
 
 function esc(s) {
   return String(s ?? "")
@@ -319,6 +377,13 @@ function fmtReset(iso) {
   return "重置于 " + d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function fmtShortTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 function render(state) {
   const mv = state.memberView;
   const dot = $("sync-dot");
@@ -326,6 +391,9 @@ function render(state) {
 
   $("onboard-card").hidden = Boolean(state.configured);
   $("cfg-details").hidden = !state.configured;
+  if ($("inp-proxy") && document.activeElement !== $("inp-proxy")) {
+    $("inp-proxy").value = state.config?.proxyUrl || "";
+  }
 
   if (!state.configured) {
     dot.className = "dot warn";
@@ -344,6 +412,13 @@ function render(state) {
 
   $("banner-err").classList.toggle("show", Boolean(state.lastError && state.configured));
   $("banner-err-text").textContent = state.lastError || "";
+
+  const rm = state.ruleMismatch;
+  $("rule-change-card").hidden = !Boolean(state.configured && rm && rm.mismatch);
+  if (rm && rm.mismatch) {
+    $("rule-diff-old").textContent = rm.agreedSummary || "原约定规则";
+    $("rule-diff-new").textContent = rm.currentSummary || "云端新规则";
+  }
 
   if (!mv) return;
 
@@ -367,7 +442,9 @@ function render(state) {
       balEl.textContent = yuan(mv.balanceFen);
       balEl.className = "balance-val" + (mv.isDepleted ? " depleted" : mv.isLowBalance ? " low" : "");
       $("unit-price-hint").textContent =
-        "Gemini " + yuan(mv.pricing?.geminiFenPerWeeklyPct) + "/1% · 3P " + yuan(mv.pricing?.thirdPartyFenPerWeeklyPct) + "/1%";
+        mv.pricing?.pricingMode === "weighted_units"
+          ? mv.pricing?.summaryText || ""
+          : "Gemini " + yuan(mv.pricing?.geminiFenPerWeeklyPct) + "/1% · 3P " + yuan(mv.pricing?.thirdPartyFenPerWeeklyPct) + "/1%";
       $("banner-low").classList.toggle("show", Boolean(mv.isLowBalance || mv.isDepleted));
       $("banner-low-text").textContent = mv.isDepleted
         ? "当前可用余额已用完（" + yuan(mv.balanceFen) + "），如需继续运行较重任务请联系组长补充。"
@@ -400,12 +477,16 @@ function render(state) {
       .map((p) => {
         const dotCls = p.online ? "dot ok" : "dot";
         const tag = p.isSelf ? "我" : p.role === "owner" ? "组长" : "";
+        const h5Parts = [];
+        if (Number(p.recent5hGeminiShare || 0) > 0) h5Parts.push("Gemini " + Number(p.recent5hGeminiShare).toFixed(0) + "%");
+        if (Number(p.recent5hThirdPartyShare || 0) > 0) h5Parts.push("3P " + Number(p.recent5hThirdPartyShare).toFixed(0) + "%");
+        const h5Line = h5Parts.length ? '<div class="peer-5h">近 5h 占 ' + h5Parts.join(" · ") + "</div>" : "";
         return (
           '<div class="peer-row">' +
           '<div class="peer-name"><span class="' + dotCls + '"></span><span>' + esc(p.name) + "</span>" +
           (tag ? '<span class="peer-tag">' + tag + "</span>" : "") +
           "</div>" +
-          '<div class="peer-nums">Gemini ' + Number(p.geminiPct || 0).toFixed(1) + "% · 3P " + Number(p.thirdPartyPct || 0).toFixed(1) + "%</div>" +
+          '<div class="peer-right"><div class="peer-nums">Gemini ' + Number(p.geminiPct || 0).toFixed(1) + "% · 3P " + Number(p.thirdPartyPct || 0).toFixed(1) + "%</div>" + h5Line + "</div>" +
           "</div>"
         );
       })
@@ -414,47 +495,104 @@ function render(state) {
 
   if (isPrepaid && mv.role !== "owner") {
     const txs = mv.recentTransactions || [];
-    $("tx-count").textContent = txs.length + " 条";
-    $("tx-list").innerHTML = txs.length
-      ? txs
+    const allocs = mv.recentAllocations || [];
+    const rcs = mv.recentRuleChanges || [];
+    $("tx-count").textContent = (txs.length + allocs.length) + " 条";
+    const parts = [];
+
+    if (allocs.length > 0) {
+      parts.push('<div class="sub-list-title">近期分摊扣费明细</div>');
+      parts.push(
+        allocs
+          .slice(0, 10)
+          .map((a) => {
+            const poolLabel = a.pool_key === "3p" ? "Claude 3P" : "Gemini";
+            const sharePct = Math.round(Number(a.member_share_ratio || 0) * 100);
+            const feeText = a.charge_fen > 0 ? "-" + yuan(a.charge_fen) : "¥0.00";
+            return (
+              '<div class="tx-row"><div><div>' +
+              poolLabel + " 分摊 " + Number(a.attributed_pct || 0).toFixed(2) + "%（当次占 " + sharePct + "%）" +
+              '</div><div style="color:var(--muted)">' +
+              fmtShortTime(a.created_at) + " · 单价 " + yuan(a.unit_price_fen_per_pct) + "/1%" +
+              '</div></div><div class="tx-neg">' + feeText + "</div></div>"
+            );
+          })
+          .join("")
+      );
+    }
+
+    if (txs.length > 0) {
+      parts.push('<div class="sub-list-title">充值与余额调整</div>');
+      parts.push(
+        txs
+          .slice(0, 8)
           .map((t) => {
-            const dt = new Date(t.created_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
             const cls = t.amount_fen >= 0 ? "tx-pos" : "tx-neg";
             const sign = t.amount_fen >= 0 ? "+" : "";
             return (
               '<div class="tx-row"><div><div>' +
               esc(t.note || (t.kind === "topup" ? "充值记录" : "余额调整")) +
-              '</div><div style="color:var(--muted)">' +
-              dt +
-              '</div></div><div class="' +
-              cls +
-              '">' +
-              sign +
-              yuan(t.amount_fen) +
-              "</div></div>"
+              '</div><div style="color:var(--muted)">' + fmtShortTime(t.created_at) +
+              '</div></div><div class="' + cls + '">' + sign + yuan(t.amount_fen) + "</div></div>"
             );
           })
           .join("")
-      : '<div style="color:var(--muted);font-size:12px;">暂无记录</div>';
+      );
+    }
+
+    if (rcs.length > 0) {
+      parts.push('<div class="sub-list-title">规则变更记录</div>');
+      parts.push(
+        rcs
+          .slice(0, 4)
+          .map((r) => (
+            '<div class="tx-row"><div><div>v' + Number(r.rule_version) + "：" + esc(r.next_summary) +
+            '</div><div style="color:var(--muted)">' + fmtShortTime(r.created_at) + "</div></div></div>"
+          ))
+          .join("")
+      );
+    }
+
+    $("tx-list").innerHTML = parts.length ? parts.join("") : '<div style="color:var(--muted);font-size:12px;">暂无记录</div>';
   }
 }
 
-async function submitInviteCode(rawCode, inputEl) {
-  const inviteCode = String(rawCode || "").trim();
-  if (!inviteCode) return;
+async function submitConfig(payload, inputEl) {
   const res = await fetch("/api/config", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ inviteCode }),
+    headers: postHeaders(),
+    body: JSON.stringify(payload),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.ok === false) {
     $("banner-err").classList.add("show");
-    $("banner-err-text").textContent = data.error || "绑定失败，请核对绑定码格式";
+    $("banner-err-text").textContent = data.error || "保存失败，请核对格式";
     return;
   }
   if (inputEl) inputEl.value = "";
   $("cfg-details").open = false;
+  if (data.state) render(data.state);
+}
+
+async function handleConfirmRules() {
+  $("btn-confirm-rules").disabled = true;
+  try {
+    const res = await fetch("/api/confirm-rules", { method: "POST", headers: postHeaders(), body: "{}" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      $("banner-err").classList.add("show");
+      $("banner-err-text").textContent = data.error || "确认失败，请稍后重试";
+      return;
+    }
+    if (data.state) render(data.state);
+  } finally {
+    $("btn-confirm-rules").disabled = false;
+  }
+}
+
+async function handleUnbind() {
+  const res = await fetch("/api/unbind", { method: "POST", headers: postHeaders(), body: "{}" });
+  const data = await res.json().catch(() => ({}));
   if (data.state) render(data.state);
 }
 
@@ -466,7 +604,7 @@ async function loadState() {
 $("btn-sync").addEventListener("click", async () => {
   $("btn-sync").disabled = true;
   try {
-    const res = await fetch("/api/sync-now", { method: "POST" });
+    const res = await fetch("/api/sync-now", { method: "POST", headers: postHeaders(), body: "{}" });
     const data = await res.json();
     if (data.state) render(data.state);
   } finally {
@@ -474,8 +612,20 @@ $("btn-sync").addEventListener("click", async () => {
   }
 });
 
-$("btn-bind-onboard").addEventListener("click", () => submitInviteCode($("inp-onboard-code").value, $("inp-onboard-code")));
-$("btn-save-invite").addEventListener("click", () => submitInviteCode($("inp-invite").value, $("inp-invite")));
+$("btn-bind-onboard").addEventListener("click", () => {
+  const code = $("inp-onboard-code").value.trim();
+  if (code) submitConfig({ inviteCode: code }, $("inp-onboard-code"));
+});
+$("btn-save-invite").addEventListener("click", () => {
+  const code = $("inp-invite").value.trim();
+  const proxyUrl = $("inp-proxy").value.trim();
+  const payload = { proxyUrl };
+  if (code) payload.inviteCode = code;
+  submitConfig(payload, $("inp-invite"));
+});
+$("btn-confirm-rules").addEventListener("click", handleConfirmRules);
+$("btn-unbind-reject").addEventListener("click", handleUnbind);
+$("btn-unbind-cfg").addEventListener("click", handleUnbind);
 
 loadState();
 setInterval(loadState, 30000);

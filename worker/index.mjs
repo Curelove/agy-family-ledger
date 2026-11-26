@@ -1,23 +1,29 @@
 /**
- * Cloudflare Workers 云端记账中转（免费层 0 元运行）
+ * Cloudflare Workers 云端记账中转 (v1.2.0 · 免费层 0 元运行)
  *
  * 环境变量：
  * - env.DB           : Cloudflare D1 数据库绑定
- * - env.ADMIN_SECRET : 管理员访问密钥（由 `wrangler secret put ADMIN_SECRET` 安全注入）
+ * - env.ADMIN_SECRET : 管理员访问密钥（由 `wrangler secret put ADMIN_SECRET` 注入）
  */
 import { LedgerStore, wrapD1Adapter } from "../shared/ledger-store.mjs";
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', member_token TEXT NOT NULL UNIQUE, balance_fen INTEGER NOT NULL DEFAULT 0, low_balance_fen INTEGER NOT NULL DEFAULT 200, status TEXT NOT NULL DEFAULT 'active', note TEXT NOT NULL DEFAULT '', last_seen_at TEXT, last_client_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS usage_reports (id TEXT PRIMARY KEY, member_id TEXT NOT NULL, slice_start_ms INTEGER NOT NULL, pool_key TEXT NOT NULL, model_name TEXT NOT NULL DEFAULT '', request_count INTEGER NOT NULL DEFAULT 0, uncached_input_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, weighted_units REAL NOT NULL DEFAULT 0, reported_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', member_token TEXT NOT NULL UNIQUE, balance_fen INTEGER NOT NULL DEFAULT 0, low_balance_fen INTEGER NOT NULL DEFAULT 200, status TEXT NOT NULL DEFAULT 'active', accepted_rule_version INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT '', last_seen_at TEXT, last_client_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS usage_reports (id TEXT PRIMARY KEY, member_id TEXT NOT NULL, slice_start_ms INTEGER NOT NULL, event_ts_ms INTEGER NOT NULL DEFAULT 0, pool_key TEXT NOT NULL, model_name TEXT NOT NULL DEFAULT '', request_count INTEGER NOT NULL DEFAULT 0, uncached_input_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, weighted_units REAL NOT NULL DEFAULT 0, settled_snapshot_id INTEGER DEFAULT NULL, reported_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_usage_reports_slice_pool ON usage_reports (slice_start_ms, pool_key);
+CREATE INDEX IF NOT EXISTS idx_usage_reports_member ON usage_reports (member_id, slice_start_ms);
 CREATE TABLE IF NOT EXISTS pool_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_key TEXT NOT NULL, window_key TEXT NOT NULL, remaining_pct REAL NOT NULL, reset_at TEXT, reporter_member_id TEXT NOT NULL, captured_at_ms INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots (pool_key, window_key, captured_at_ms);
 CREATE TABLE IF NOT EXISTS slice_allocations (id TEXT PRIMARY KEY, pool_key TEXT NOT NULL, slice_start_ms INTEGER NOT NULL, week_bucket TEXT NOT NULL, member_id TEXT NOT NULL, pool_drop_pct REAL NOT NULL, member_share_ratio REAL NOT NULL, attributed_pct REAL NOT NULL, weighted_units REAL NOT NULL, unit_price_fen_per_pct INTEGER NOT NULL, charge_fen INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_week ON slice_allocations (member_id, week_bucket);
+CREATE INDEX IF NOT EXISTS idx_slice_alloc_time ON slice_allocations (slice_start_ms);
 CREATE TABLE IF NOT EXISTS transactions (id TEXT PRIMARY KEY, member_id TEXT NOT NULL, kind TEXT NOT NULL, amount_fen INTEGER NOT NULL, balance_after_fen INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_transactions_member ON transactions (member_id, created_at);
+CREATE TABLE IF NOT EXISTS rule_changes (id TEXT PRIMARY KEY, rule_version INTEGER NOT NULL, changed_fields_json TEXT NOT NULL, prev_summary TEXT NOT NULL, next_summary TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_rule_changes_version ON rule_changes (rule_version DESC);
 CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL, pool_key TEXT NOT NULL DEFAULT '', member_id TEXT NOT NULL DEFAULT '', missing_pct REAL NOT NULL DEFAULT 0, title TEXT NOT NULL, detail TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0, qq_notified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts (acknowledged, created_at);
 `;
 
 let schemaBootstrapped = false;
@@ -56,6 +62,17 @@ function checkAdmin(req, env) {
   return { ok: true };
 }
 
+function extractMemberToken(request, body = null) {
+  const fromHeader =
+    request.headers.get("X-Member-Token") ||
+    (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  if (fromHeader) return fromHeader;
+  if (body && typeof body === "object" && body.memberToken) {
+    return String(body.memberToken).trim();
+  }
+  return "";
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -76,7 +93,7 @@ export default {
       return jsonResp({
         ok: true,
         service: "agy-family-ledger-worker",
-        version: "1.1.0",
+        version: "1.2.0",
         hasDb: Boolean(env?.DB),
         hasAdminSecret: Boolean(env?.ADMIN_SECRET),
       });
@@ -87,10 +104,6 @@ export default {
     }
 
     const store = new LedgerStore(wrapD1Adapter(env.DB));
-    if (!schemaBootstrapped) {
-      await store.ensureSchema(SCHEMA_SQL);
-      schemaBootstrapped = true;
-    }
 
     const readBody = async () => {
       try {
@@ -101,17 +114,29 @@ export default {
     };
 
     try {
-      // ========== 成员端 API（持专属 member_token 访问） ==========
+      if (!schemaBootstrapped) {
+        await store.ensureSchema(SCHEMA_SQL);
+        schemaBootstrapped = true;
+      }
+      // ========== 成员端 API（持专属 member_token 经请求头访问） ==========
       if (pathname === "/api/member/heartbeat" && request.method === "POST") {
         const body = await readBody();
-        const token = request.headers.get("X-Member-Token") || body.memberToken || "";
+        const token = extractMemberToken(request, body);
         const { nowMs: _ignoredNowMs, ...safeBody } = body && typeof body === "object" ? body : {};
         const res = await store.ingestHeartbeat(token, safeBody);
         return jsonResp(res);
       }
 
+      if (pathname === "/api/member/confirm-rules" && request.method === "POST") {
+        const body = await readBody();
+        const token = extractMemberToken(request, body);
+        const res = await store.confirmMemberRules(token, body?.ruleVersion ?? null);
+        return jsonResp(res);
+      }
+
       if (pathname === "/api/member/me" && request.method === "GET") {
-        const token = request.headers.get("X-Member-Token") || url.searchParams.get("token") || "";
+        const token = extractMemberToken(request);
+        if (!token) return jsonResp({ ok: false, error: "请通过请求头提供成员凭证" }, 401);
         const row = await store.db.first("SELECT id FROM members WHERE member_token = ?", [token]);
         if (!row) return jsonResp({ ok: false, error: "无效的成员凭证" }, 401);
         const member = await store.getMemberSelfView(row.id);

@@ -1,23 +1,23 @@
 /**
- * Antigravity 家庭组共享额度看板 · 本地管理控制台后端
+ * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.2.0)
  *
  * 特性：
  * - 支持 Cloudflare Workers 云端同步与本机 SQLite 离线存储切换。
- * - 零私包分发：所有成员统一从 GitHub 官方公开源安装插件，组长仅生成单行纯文本绑定码（https://域名#agf_xxxx）。
- * - 一键将组长本人插件同步到本机 Antigravity 目录。
- * - 兼容原生 WebView2 .exe 宿主规范（支持 FAMILY_LEDGER_PORT 与 /api/health 签名校验）。
+ * - 零私包分发：所有成员统一从 GitHub Releases 官方构建包或仓库源码安装插件，组长仅发送含初始约定的纯文本绑定码。
+ * - 启用本地随机一次性 Session Token + Origin / Content-Type 校验，彻底防跨站请求伪造（CSRF）。
+ * - 切换为云端同步模式后自动拦截本地死库心跳，并提示同步更新组长本机插件地址，杜绝本地/云端脑裂。
  */
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { LedgerStore, wrapNodeSqliteAdapter } from "../shared/ledger-store.mjs";
+import { formatPricingRuleSummary } from "../shared/billing-engine.mjs";
+import { buildInviteCode } from "../member-plugin/sidecars/ledger/collector.mjs";
 
-const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -30,6 +30,7 @@ const SCHEMA_PATH = path.join(PROJECT_ROOT, "shared", "schema.sql");
 const CONFIG_FILE = path.join(DATA_DIR, "console_config.json");
 const LOCAL_DB_FILE = path.join(DATA_DIR, "local_ledger.sqlite");
 const GITHUB_REPO_URL = "https://github.com/Curelove/agy-family-ledger";
+const SESSION_TOKEN = crypto.randomBytes(24).toString("hex");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -38,14 +39,16 @@ function loadConsoleConfig() {
     mode: "local", // 'local' | 'cloud'
     cloudWorkerUrl: "",
     adminSecret: "",
-    enableQqAlertForward: false,
-    ownerQqUin: "",
-    qqBridgeScript: "",
   };
   try {
     if (!fs.existsSync(CONFIG_FILE)) return def;
     const raw = fs.readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, "");
-    return { ...def, ...(raw.trim() ? JSON.parse(raw) : {}) };
+    const parsed = raw.trim() ? JSON.parse(raw) : {};
+    return {
+      mode: parsed.mode === "cloud" ? "cloud" : "local",
+      cloudWorkerUrl: String(parsed.cloudWorkerUrl || "").trim().replace(/\/+$/, ""),
+      adminSecret: String(parsed.adminSecret || "").trim(),
+    };
   } catch {
     return def;
   }
@@ -54,7 +57,6 @@ function loadConsoleConfig() {
 function saveConsoleConfig(patch = {}) {
   const cur = loadConsoleConfig();
   const next = {
-    ...cur,
     mode: patch.mode === "cloud" || patch.mode === "local" ? patch.mode : cur.mode,
     cloudWorkerUrl:
       patch.cloudWorkerUrl !== undefined
@@ -64,11 +66,37 @@ function saveConsoleConfig(patch = {}) {
       patch.adminSecret !== undefined && patch.adminSecret !== ""
         ? String(patch.adminSecret).trim()
         : cur.adminSecret,
-    enableQqAlertForward:
-      patch.enableQqAlertForward !== undefined ? Boolean(patch.enableQqAlertForward) : cur.enableQqAlertForward,
   };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), "utf8");
   return next;
+}
+
+function inspectOwnerLocalPluginTarget(cfg, serverPort) {
+  const expectedUrl =
+    cfg.mode === "cloud" && cfg.cloudWorkerUrl
+      ? cfg.cloudWorkerUrl.replace(/\/+$/, "")
+      : `http://127.0.0.1:${serverPort}`;
+  const pluginCfgPath = path.join(
+    os.homedir(),
+    ".gemini",
+    "config",
+    "plugins",
+    "agy-family-ledger",
+    "sidecars",
+    "ledger",
+    "config.json"
+  );
+  try {
+    if (!fs.existsSync(pluginCfgPath)) {
+      return { installed: false, currentServerUrl: "", needsSync: false };
+    }
+    const parsed = JSON.parse(fs.readFileSync(pluginCfgPath, "utf8").replace(/^\uFEFF/, ""));
+    const curUrl = String(parsed?.serverUrl || "").trim().replace(/\/+$/, "");
+    const needsSync = Boolean(curUrl && curUrl !== expectedUrl);
+    return { installed: true, currentServerUrl: curUrl, needsSync };
+  } catch {
+    return { installed: false, currentServerUrl: "", needsSync: false };
+  }
 }
 
 const sqliteDb = new DatabaseSync(LOCAL_DB_FILE);
@@ -83,7 +111,7 @@ async function proxyToCloud(cfg, apiPath, method = "GET", body = null) {
   const resp = await fetch(url, {
     method,
     headers: {
-      "User-Agent": "AgyFamilyLedger/1.1",
+      "User-Agent": "AgyFamilyLedger/1.2",
       "Content-Type": "application/json",
       "X-Admin-Secret": cfg.adminSecret,
     },
@@ -132,6 +160,7 @@ async function callBackend(apiPath, method = "GET", body = null) {
 function copyDirSync(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    if (ent.name === "config.json" || ent.name.startsWith(".")) continue;
     const s = path.join(src, ent.name);
     const d = path.join(dst, ent.name);
     if (ent.isDirectory()) copyDirSync(s, d);
@@ -140,20 +169,36 @@ function copyDirSync(src, dst) {
 }
 
 /**
- * 生成指定成员的纯文本绑定信息（不生成任何私发压缩包）
+ * 生成指定成员的含初始规则约定的纯文本绑定信息（零私包，官方 GitHub Releases 渠道）
  */
 async function buildMemberInviteInfo(memberId, serverPort) {
   const dash = await callBackend("/api/admin/dashboard", "GET");
   const member = (dash.members || []).find((m) => m.id === memberId);
   if (!member) throw new Error("未找到指定成员");
+  if (member.status === "archived") {
+    throw new Error("该成员已停用归档，无法生成有效绑定码");
+  }
 
   const cfg = loadConsoleConfig();
+  const s = dash.settings || {};
   const targetUrl =
     cfg.mode === "cloud" && cfg.cloudWorkerUrl
       ? cfg.cloudWorkerUrl
       : `http://127.0.0.1:${serverPort}`;
 
-  const inviteCode = `${targetUrl}#${member.memberToken}`;
+  const ruleVersion = Math.max(1, Number(s.rule_version) || 1);
+  const ledgerMode = s.ledger_mode === "prepaid" ? "prepaid" : "board_only";
+  const gemFen = Number(s.gemini_fen_per_weekly_pct) || 100;
+  const p3Fen = Number(s.third_party_fen_per_weekly_pct) || 180;
+
+  const inviteCode = buildInviteCode({
+    serverUrl: targetUrl,
+    memberToken: member.memberToken,
+    ruleVersion,
+    ledgerMode,
+    geminiFenPerWeeklyPct: gemFen,
+    thirdPartyFenPerWeeklyPct: p3Fen,
+  });
   const isLocalOnly = /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(targetUrl);
 
   return {
@@ -162,16 +207,18 @@ async function buildMemberInviteInfo(memberId, serverPort) {
     memberName: member.name,
     serverUrl: targetUrl,
     inviteCode,
+    ruleVersion,
+    termsSummary: formatPricingRuleSummary(s),
     isLocalOnly,
     repoUrl: GITHUB_REPO_URL,
     releasesUrl: `${GITHUB_REPO_URL}/releases/latest`,
     collectorSourceUrl: `${GITHUB_REPO_URL}/blob/main/member-plugin/sidecars/ledger/collector.mjs`,
-    marketCmd: `npx agy-market add ${GITHUB_REPO_URL}/tree/main/member-plugin`,
+    gitCloneCmd: `git clone --depth 1 ${GITHUB_REPO_URL}.git`,
   };
 }
 
 /**
- * 将组长本人插件同步到本机 Antigravity 插件目录
+ * 将组长本人插件同步到本机 Antigravity 插件目录（写入最新 config.json 后运行中 Sidecar 会自动热重载）
  */
 async function installOwnerPluginLocally(serverPort) {
   const dash = await callBackend("/api/admin/dashboard", "GET");
@@ -186,13 +233,23 @@ async function installOwnerPluginLocally(serverPort) {
 
   const dst = path.join(os.homedir(), ".gemini", "config", "plugins", "agy-family-ledger");
   copyDirSync(MEMBER_PLUGIN_SRC, dst);
+  const cfgFile = path.join(dst, "sidecars", "ledger", "config.json");
+  let existingProxy = "";
+  try {
+    if (fs.existsSync(cfgFile)) {
+      const prev = JSON.parse(fs.readFileSync(cfgFile, "utf8").replace(/^\uFEFF/, ""));
+      existingProxy = String(prev?.proxyUrl || "").trim();
+    }
+  } catch {}
+
   fs.writeFileSync(
-    path.join(dst, "sidecars", "ledger", "config.json"),
+    cfgFile,
     JSON.stringify(
       {
         serverUrl: targetUrl,
         memberToken: owner.memberToken,
         memberName: owner.name,
+        proxyUrl: existingProxy,
         syncIntervalSec: 90,
       },
       null,
@@ -204,7 +261,7 @@ async function installOwnerPluginLocally(serverPort) {
 }
 
 /**
- * 本地离线模式示例数据：写入 2 位演示成员的多池消耗，保留当前所选运行模式（纯看板或按量记账）
+ * 本地离线模式示例数据
  */
 async function seedLocalDemoScenario() {
   const cfg = loadConsoleConfig();
@@ -213,8 +270,8 @@ async function seedLocalDemoScenario() {
   }
   const dash0 = await localStore.getAdminDashboard();
   const owner = dash0.members.find((m) => m.role === "owner");
-  let alice = dash0.members.find((m) => m.name === "林屿（示例）");
-  let bob = dash0.members.find((m) => m.name === "周然（示例）");
+  let alice = dash0.members.find((m) => m.name === "林屿（示例）" && m.status !== "archived");
+  let bob = dash0.members.find((m) => m.name === "周然（示例）" && m.status !== "archived");
 
   if (!alice) {
     alice = await localStore.createMember({
@@ -315,37 +372,6 @@ async function seedLocalDemoScenario() {
   return { ok: true, message: "已填充本地示例数据" };
 }
 
-async function pollAndForwardQqAlerts() {
-  const cfg = loadConsoleConfig();
-  const bridgeScript = String(cfg.qqBridgeScript || process.env.AGY_QQ_BRIDGE_SCRIPT || "").trim();
-  const targetUser = String(cfg.ownerQqUin || process.env.AGY_OWNER_QQ_UIN || "").trim();
-  if (!cfg.enableQqAlertForward || !bridgeScript || !targetUser || !fs.existsSync(bridgeScript)) return;
-  try {
-    const res =
-      cfg.mode === "cloud"
-        ? await proxyToCloud(cfg, "/api/admin/alerts/unnotified", "GET")
-        : { ok: true, alerts: await localStore.getUnnotifiedAlerts() };
-    const list = Array.isArray(res?.alerts) ? res.alerts : [];
-    if (list.length === 0) return;
-
-    const lines = list.map((a) => `• [${a.severity === "critical" ? "严重" : "提醒"}] ${a.title}：${a.detail}`);
-    const text = `【家庭组额度看板提醒】\n${lines.join("\n")}`;
-    await execFileAsync(
-      process.execPath,
-      [bridgeScript, "send-private", "--user", targetUser, "--text", text],
-      { windowsHide: true, timeout: 15000 }
-    );
-    const ids = list.map((a) => a.id);
-    if (cfg.mode === "cloud") {
-      await proxyToCloud(cfg, "/api/admin/alerts/mark-notified", "POST", { ids });
-    } else {
-      await localStore.markAlertsQqNotified(ids);
-    }
-  } catch {
-    // 推送未就绪时静默跳过
-  }
-}
-
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -363,18 +389,46 @@ function sendJson(res, data, status = 200) {
   res.end(JSON.stringify(data));
 }
 
+function checkLocalCsrf(req, port) {
+  const origin = String(req.headers.origin || "").trim();
+  if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
+    return { ok: false, error: "拒绝跨站来源请求（CSRF 防护）" };
+  }
+  const token = String(req.headers["x-console-token"] || "").trim();
+  if (token !== SESSION_TOKEN) {
+    return { ok: false, error: "缺少或无效的本地会话令牌，请刷新控制台页面重试" };
+  }
+  return { ok: true };
+}
+
 const PORT = Number(process.env.FAMILY_LEDGER_PORT || 18945);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
   const pathname = url.pathname;
+  const method = req.method || "GET";
+
+  const isMemberRoute = pathname.startsWith("/api/member/");
+  const isMutatingConsoleApi =
+    pathname.startsWith("/api/") && !isMemberRoute && ["POST", "PATCH", "PUT", "DELETE"].includes(method);
+
+  if (isMutatingConsoleApi) {
+    const csrf = checkLocalCsrf(req, PORT);
+    if (!csrf.ok) {
+      return sendJson(res, { ok: false, error: csrf.error }, 403);
+    }
+  }
 
   let body = {};
-  if (["POST", "PATCH", "PUT"].includes(req.method || "")) {
+  if (["POST", "PATCH", "PUT"].includes(method)) {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const raw = Buffer.concat(chunks).toString("utf8");
     if (raw.trim()) {
+      const ct = String(req.headers["content-type"] || "").toLowerCase();
+      if (isMutatingConsoleApi && !ct.includes("application/json")) {
+        return sendJson(res, { ok: false, error: "仅接受 application/json 请求体" }, 415);
+      }
       try {
         body = JSON.parse(raw);
       } catch {
@@ -384,75 +438,113 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    if (pathname === "/api/health" && req.method === "GET") {
+    if (pathname === "/api/health" && method === "GET") {
       const cfg = loadConsoleConfig();
       return sendJson(res, {
         ok: true,
         app: "agy-family-ledger-console",
-        version: "1.1.0",
+        version: "1.2.0",
         mode: cfg.mode,
         port: PORT,
       });
     }
 
-    if (pathname === "/api/member/heartbeat" && req.method === "POST") {
+    if (pathname === "/api/member/heartbeat" && method === "POST") {
+      const cfg = loadConsoleConfig();
+      if (cfg.mode === "cloud") {
+        return sendJson(
+          res,
+          {
+            ok: false,
+            error: "管理台已切换为云端同步模式，请重新点击「装到本机」或将插件绑定码更新为云端地址",
+          },
+          409
+        );
+      }
       const token = req.headers["x-member-token"] || body.memberToken || "";
       const { nowMs: _ignoredNowMs, ...safeBody } = body && typeof body === "object" ? body : {};
       return sendJson(res, await localStore.ingestHeartbeat(token, safeBody));
     }
 
-    if (pathname === "/api/console-config" && req.method === "GET") {
+    if (pathname === "/api/member/confirm-rules" && method === "POST") {
       const cfg = loadConsoleConfig();
+      if (cfg.mode === "cloud") {
+        return sendJson(res, { ok: false, error: "管理台已切换为云端同步模式，请改连云端地址" }, 409);
+      }
+      const token = req.headers["x-member-token"] || body.memberToken || "";
+      return sendJson(res, await localStore.confirmMemberRules(token, body?.ruleVersion ?? null));
+    }
+
+    if (pathname === "/api/console-config" && method === "GET") {
+      const cfg = loadConsoleConfig();
+      const ownerLocal = inspectOwnerLocalPluginTarget(cfg, PORT);
       return sendJson(res, {
         ok: true,
         config: {
           mode: cfg.mode,
           cloudWorkerUrl: cfg.cloudWorkerUrl,
           hasAdminSecret: Boolean(cfg.adminSecret),
-          enableQqAlertForward: cfg.enableQqAlertForward,
-          hasLocalPushConfig: Boolean(cfg.qqBridgeScript && cfg.ownerQqUin),
+          ownerPluginInstalled: ownerLocal.installed,
+          ownerPluginServerUrl: ownerLocal.currentServerUrl,
+          ownerPluginNeedsSync: ownerLocal.needsSync,
         },
       });
     }
-    if (pathname === "/api/console-config" && req.method === "PATCH") {
+    if (pathname === "/api/console-config" && method === "PATCH") {
       const next = saveConsoleConfig(body);
+      const ownerLocal = inspectOwnerLocalPluginTarget(next, PORT);
       return sendJson(res, {
         ok: true,
         config: {
           mode: next.mode,
           cloudWorkerUrl: next.cloudWorkerUrl,
           hasAdminSecret: Boolean(next.adminSecret),
-          enableQqAlertForward: next.enableQqAlertForward,
-          hasLocalPushConfig: Boolean(next.qqBridgeScript && next.ownerQqUin),
+          ownerPluginInstalled: ownerLocal.installed,
+          ownerPluginServerUrl: ownerLocal.currentServerUrl,
+          ownerPluginNeedsSync: ownerLocal.needsSync,
         },
       });
     }
 
     const invMatch = pathname.match(/^\/api\/invite-info\/([^/]+)$/);
-    if (invMatch && req.method === "GET") {
+    if (invMatch && method === "GET") {
       return sendJson(res, await buildMemberInviteInfo(decodeURIComponent(invMatch[1]), PORT));
     }
 
-    if (pathname === "/api/install-owner-local" && req.method === "POST") {
+    if (pathname === "/api/install-owner-local" && method === "POST") {
       return sendJson(res, await installOwnerPluginLocally(PORT));
     }
 
-    if (pathname === "/api/demo/seed" && req.method === "POST") {
+    if (pathname === "/api/demo/seed" && method === "POST") {
       return sendJson(res, await seedLocalDemoScenario());
     }
 
     if (pathname.startsWith("/api/admin/")) {
-      return sendJson(res, await callBackend(pathname, req.method || "GET", body));
+      return sendJson(res, await callBackend(pathname, method, body));
     }
 
     const relPath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
     const safeFile = path.resolve(PUBLIC_DIR, relPath);
-    if (!safeFile.startsWith(PUBLIC_DIR) || !fs.existsSync(safeFile) || fs.statSync(safeFile).isDirectory()) {
+    const relCheck = path.relative(PUBLIC_DIR, safeFile);
+    if (relCheck.startsWith("..") || path.isAbsolute(relCheck) || !fs.existsSync(safeFile) || fs.statSync(safeFile).isDirectory()) {
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("Not Found");
       return;
     }
     const ext = path.extname(safeFile).toLowerCase();
+    if (ext === ".html") {
+      const rawHtml = fs.readFileSync(safeFile, "utf8");
+      const withToken = rawHtml.replace(
+        "</head>",
+        `  <meta name="console-token" content="${SESSION_TOKEN}"/>\n</head>`
+      );
+      res.writeHead(200, {
+        "Content-Type": MIME[ext],
+        "Cache-Control": "no-store",
+      });
+      res.end(withToken);
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": MIME[ext] || "application/octet-stream",
       "Cache-Control": "no-store",
@@ -468,13 +560,9 @@ server.listen(PORT, "127.0.0.1", () => {
     JSON.stringify({
       ok: true,
       app: "agy-family-ledger-console",
-      version: "1.1.0",
+      version: "1.2.0",
       url: `http://127.0.0.1:${PORT}`,
       mode: loadConsoleConfig().mode,
     })
   );
 });
-
-setInterval(() => {
-  pollAndForwardQqAlerts().catch(() => {});
-}, 60_000).unref();

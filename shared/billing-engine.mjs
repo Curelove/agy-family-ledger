@@ -1,67 +1,75 @@
 /**
- * Antigravity 熟人家庭组透明用量账本 · 核心纯函数计算引擎
+ * Antigravity 家庭组共享额度看板 · 核心纯函数计算引擎 (v1.2.0)
  *
  * 设计原则：
- * 1. 所有金额使用整数「分」（100 分 = 1.00 元），杜绝浮点精度漂移。
- * 2. Gemini 池与 3P（Claude / GPT）池完全分开核算与定价。
- * 3. 多人并发使用同一 5 分钟切片时，按「模型倍率 × 缓存折算等效 Token」公平拆账。
- * 4. 自动识别官方配额重置（剩余百分比突增），绝不产生负数扣费。
- * 5. 黑洞预警采用三层防误报滤波：单次小波动过滤 + 15 分钟持续缺口校验 + 在线/离线分级定性。
+ * 1. 所有金额使用整数「分」（100 分 = 1.00 元），避免浮点精度误差。
+ * 2. Gemini 池与 Claude / 第三方 3P 池分开核算与定价。
+ * 3. 多人并发使用时，按「模型倍率 × 缓存折算等效单位」分摊当次官方总池下降量，
+ *    并对单人可解释上限设置合理边界，防止未装插件设备的消耗转嫁给在线成员。
+ * 4. 自动识别官方配额重置（含离线跨重置周期后的新周期首段消耗），绝不产生负数扣费。
+ * 5. 未统计消耗预警采用滚动累计窗口，既能捕捉 90 秒心跳下的持续慢速偷跑，又避免单次小抖动误报。
  */
 
 export const SLICE_MS = 5 * 60 * 1000; // 5 分钟统计切片
 
 export const DEFAULT_SETTINGS = {
   family_name: "家庭组共享额度看板",
-  ledger_mode: "board_only", // 'board_only'（纯看板：只展示各成员用量占比，不记钱）| 'prepaid'（按量记账：启用预存余额与单价折算）
-  pricing_mode: "weekly_pct", // 'weekly_pct'（按每周总池%折算） | 'weighted_units'（按等效百万点折算）
-  gemini_fen_per_weekly_pct: 100, // Gemini 周池每消耗 1% = 1.00 元（仅在 prepaid 模式下生效）
+  ledger_mode: "board_only", // 'board_only'（纯看板）| 'prepaid'（按量记账）
+  rule_version: 1, // 规则版本号：每次修改记账方式或单价自动 +1，成员端据此核对约定
+  pricing_mode: "weekly_pct", // 'weekly_pct'（按周池百分比折算）| 'weighted_units'（按等效百万单位折算）
+  gemini_fen_per_weekly_pct: 100, // Gemini 周池每消耗 1% = 1.00 元（仅 prepaid 模式生效）
   third_party_fen_per_weekly_pct: 180, // Claude 3P 周池每消耗 1% = 1.80 元
   gemini_fen_per_million_units: 80,
   third_party_fen_per_million_units: 200,
   default_low_balance_fen: 200,
-  expected_units_per_pct_gemini: 1_500_000,
-  expected_units_per_pct_3p: 600_000,
-  // 异常未统计掉量滤波阈值
-  blackhole_min_single_drop_pct: 3.0,
+  expected_units_per_pct_gemini: 400_000,
+  expected_units_per_pct_3p: 250_000,
+  // 未统计掉量滚动滤波阈值（0.5% 以上进入累计窗口，累计达到提醒线才告警）
+  blackhole_min_single_drop_pct: 0.5,
   blackhole_window_minutes: 15,
   blackhole_warn_missing_pct: 5.0,
   blackhole_critical_missing_pct: 15.0,
   offline_grace_minutes: 12,
-  calibration_dry_run: true, // 与 ledger_mode 保持同步（board_only => true, prepaid => false），兼容旧数据
-  quota_snapshot_authority: "owner_only", // 'owner_only'（仅组长设备可同步官方总剩余额度）| 'all_members'
-  show_peer_shares_to_members: true, // 允许组内成员在侧边栏看到全组各人的近 7 天用量占比（不含余额与凭证）
+  calibration_dry_run: true, // 与 ledger_mode 保持同步，兼容旧数据
+  quota_snapshot_authority: "owner_only", // 'owner_only' | 'all_members'
+  show_peer_shares_to_members: true, // 允许成员看到组内各人的本周期与近 5 小时用量（不含余额与凭证）
 };
 
 /**
  * 归一化模型名称所属池子：'gemini' | '3p'
  */
 export function classifyModelPool(modelName = "") {
-  const s = String(modelName || "").toLowerCase();
+  const s = String(modelName || "").trim().toLowerCase();
   if (!s) return "gemini";
+  if (/gemini|gemma|\bneon\b|\bcarbon\b|\bhydrogen\b|\bargon\b|\bflash\b/.test(s)) {
+    return "gemini";
+  }
   if (
-    /claude|opus|sonnet|haiku|anthropic|gpt|openai|o1|o3|o4|^3p/.test(s)
+    /claude|opus|sonnet|haiku|anthropic|gpt|openai|\bo1\b|\bo3\b|\bo4\b|deepseek|qwen|llama|mistral|^3p/.test(
+      s
+    )
   ) {
     return "3p";
   }
-  return "gemini";
+  // 未知的非 Gemini 命名模型默认归入第三方 3P 池，避免新第三方模型漏归类
+  return "3p";
 }
 
 /**
- * 获取模型消耗倍率（对齐 Antigravity 官方倍率：Carbon 3x、Neon/Hydrogen/Flash 1x、Opus 2x）
+ * 获取模型消耗倍率（对齐 Antigravity 倍率：Carbon 3x、Opus 2x、Argon 1.5x、Sonnet 1.2x、Neon 1x、Hydrogen/Flash 0.7x）
  */
 export function getModelMultiplier(modelName = "") {
   const s = String(modelName || "").toLowerCase();
   if (s.includes("carbon")) return 3.0;
   if (s.includes("opus")) return 2.0;
-  if (s.includes("sonnet")) return 1.2;
   if (s.includes("argon")) return 1.5;
+  if (s.includes("sonnet")) return 1.2;
   if (s.includes("hydrogen") || s.includes("flash")) return 0.7;
-  return 1.0; // neon 等默认 1x
+  return 1.0;
 }
 
 /**
- * 计算单条请求的加权等效单位（与价格比例同构：输出更贵、缓存读取极便宜）
+ * 计算单条请求的加权等效单位（输出权重更高，缓存命中权重较低）
  */
 export function computeWeightedUnits({
   modelName = "",
@@ -88,7 +96,7 @@ export function alignSliceStartMs(tsMs = Date.now()) {
 }
 
 /**
- * 根据 resetAt 推导稳定的周周期标识（YYYY-Wxx 或 reset ISO 日期）
+ * 根据 resetAt 推导稳定的周周期标识（reset:YYYY-MM-DD 或 ISO 周）
  */
 export function deriveWeekBucket(resetAt = "", nowMs = Date.now()) {
   if (typeof resetAt === "string" && /^\d{4}-\d{2}-\d{2}T/.test(resetAt)) {
@@ -101,19 +109,38 @@ export function deriveWeekBucket(resetAt = "", nowMs = Date.now()) {
 }
 
 /**
+ * 格式化可读规则摘要（用于审计日志与成员端变价对比）
+ */
+export function formatPricingRuleSummary(settings = DEFAULT_SETTINGS) {
+  const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  if (s.ledger_mode !== "prepaid") {
+    return "纯看板模式（仅统计用量占比，不计费用）";
+  }
+  const gYuan = ((Number(s.gemini_fen_per_weekly_pct) || 100) / 100).toFixed(2);
+  const pYuan = ((Number(s.third_party_fen_per_weekly_pct) || 180) / 100).toFixed(2);
+  if (s.pricing_mode === "weighted_units") {
+    const gm = ((Number(s.gemini_fen_per_million_units) || 80) / 100).toFixed(2);
+    const pm = ((Number(s.third_party_fen_per_million_units) || 200) / 100).toFixed(2);
+    return `按量记账模式（按等效单位：Gemini ¥${gm}/百万，3P ¥${pm}/百万）`;
+  }
+  return `按量记账模式（Gemini ¥${gYuan}/1%，Claude 3P ¥${pYuan}/1%）`;
+}
+
+/**
  * 判断两次配额水位快照之间是「正常消耗下降」还是「官方配额重置回升」
- * 返回：{ dropPct, isReset, resetJumpPct }
+ * 返回：{ dropPct, isReset, resetJumpPct, postResetDropPct }
+ * - 当检测到跨周期重置且新周期已经从 100% 消耗至 clampedNext（例如 82%）时，
+ *   postResetDropPct 返回 18.0，便于把离线跨重置后的新周期真实消耗入账，不再蒸发。
  */
 export function evaluateQuotaDelta(prevPct, nextPct, prevResetAt = "", nextResetAt = "") {
   const p = Number(prevPct);
   const n = Number(nextPct);
   if (!Number.isFinite(p) || !Number.isFinite(n)) {
-    return { dropPct: 0, isReset: false, resetJumpPct: 0 };
+    return { dropPct: 0, isReset: false, resetJumpPct: 0, postResetDropPct: 0 };
   }
   const clampedPrev = Math.max(0, Math.min(100, p));
   const clampedNext = Math.max(0, Math.min(100, n));
 
-  // 如果重置时间戳向后跳变，或剩余百分比明显反弹（> +2%），判定为官方重置事件
   const prevResetMs = prevResetAt ? Date.parse(prevResetAt) : NaN;
   const nextResetMs = nextResetAt ? Date.parse(nextResetAt) : NaN;
   const resetTimeShifted =
@@ -122,10 +149,13 @@ export function evaluateQuotaDelta(prevPct, nextPct, prevResetAt = "", nextReset
     nextResetMs - prevResetMs > 3600 * 1000;
 
   if (resetTimeShifted || clampedNext - clampedPrev > 2.0) {
+    const postResetDropPct =
+      clampedNext < 99.95 ? Math.round((100 - clampedNext) * 1000) / 1000 : 0;
     return {
       dropPct: 0,
       isReset: true,
       resetJumpPct: Math.round((clampedNext - clampedPrev) * 100) / 100,
+      postResetDropPct,
     };
   }
 
@@ -134,14 +164,15 @@ export function evaluateQuotaDelta(prevPct, nextPct, prevResetAt = "", nextReset
     dropPct: rawDrop > 0 ? Math.round(rawDrop * 1000) / 1000 : 0,
     isReset: false,
     resetJumpPct: 0,
+    postResetDropPct: 0,
   };
 }
 
 /**
- * 给定某切片全组总池掉落百分比 `poolDropPct` 与各成员上报的 `weightedUnits` 列表，
- * 计算每个成员应分摊的百分比、费用（分）以及未解释的「黑洞缺口」百分比。
+ * 给定某次官方总池掉落百分比 `poolDropPct` 与当期未结算成员的 `weightedUnits` 列表，
+ * 计算每个成员应分摊的百分比、费用（分）以及未解释的消耗差值百分比。
  *
- * memberUsages: Array<{ memberId, role, weightedUnits }>
+ * memberUsages: Array<{ memberId, role, weightedUnits, acceptedRuleVersion? }>
  */
 export function allocateSliceUsage({
   poolKey = "gemini",
@@ -150,12 +181,15 @@ export function allocateSliceUsage({
   settings = DEFAULT_SETTINGS,
 } = {}) {
   const cfg = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  const currentRuleVersion = Math.max(1, Number(cfg.rule_version) || 1);
   const drop = Math.max(0, Number(poolDropPct) || 0);
   const active = (Array.isArray(memberUsages) ? memberUsages : [])
     .map((m) => ({
       memberId: String(m.memberId || ""),
       role: m.role === "owner" ? "owner" : "member",
       weightedUnits: Math.max(0, Number(m.weightedUnits) || 0),
+      acceptedRuleVersion:
+        m.acceptedRuleVersion !== undefined ? Number(m.acceptedRuleVersion) : currentRuleVersion,
     }))
     .filter((m) => m.memberId && m.weightedUnits > 0);
 
@@ -170,10 +204,9 @@ export function allocateSliceUsage({
       : Number(cfg.gemini_fen_per_million_units) || 80;
   const expectedUnitsPerPct =
     poolKey === "3p"
-      ? Number(cfg.expected_units_per_pct_3p) || 600_000
-      : Number(cfg.expected_units_per_pct_gemini) || 1_500_000;
+      ? Number(cfg.expected_units_per_pct_3p) || 250_000
+      : Number(cfg.expected_units_per_pct_gemini) || 400_000;
 
-  // 若全组总池有明显掉落，但无人上报任何 Token（totalUnits === 0），则全部掉落归为未上报黑洞
   if (drop > 0 && totalUnits <= 0) {
     return {
       allocations: [],
@@ -182,25 +215,26 @@ export function allocateSliceUsage({
     };
   }
 
-  // 计算上报的 Token 最多能合理解释掉多少百分比：
-  // 留足 10x 宽容系数 + 4% 缓冲，覆盖多模态读图、高强度思考与偶发缓存掉 0 场景，避免正常账目被误切出零头；
-  // 仅当总池暴跌远超合理上限（如上报极少 Token 却凭空暴跌 15%+）时，溢出部分才记入未解释黑洞。
+  // 防背锅上限：按上报等效单位推算合理可解释百分比（3.5x 弹性覆盖多模态/思考波动 + 0.8% 整数取整容差），
+  // 杜绝某位成员只发了极少请求却替未装插件设备扛下 4%~9% 的异常掉量。
   const maxExplainablePct =
-    totalUnits > 0 ? (totalUnits / Math.max(10_000, expectedUnitsPerPct)) * 10.0 + 4.0 : 0;
+    totalUnits > 0 ? (totalUnits / Math.max(10_000, expectedUnitsPerPct)) * 3.5 + 0.8 : 0;
   const explainableDropPct = drop > 0 ? Math.min(drop, maxExplainablePct) : 0;
   const unexplainedDropPct =
     drop > explainableDropPct
       ? Math.round((drop - explainableDropPct) * 1000) / 1000
       : 0;
 
+  const isPrepaidBilling =
+    cfg.ledger_mode === "prepaid" || (cfg.ledger_mode === undefined && !cfg.calibration_dry_run);
+
   const allocations = active.map((m) => {
     const ratio = totalUnits > 0 ? m.weightedUnits / totalUnits : 0;
     const attributedPct = Math.round(explainableDropPct * ratio * 1000) / 1000;
+    const ruleUnconfirmed = m.role !== "owner" && m.acceptedRuleVersion < currentRuleVersion;
 
     let chargeFen = 0;
-    const isPrepaidBilling =
-      cfg.ledger_mode === "prepaid" || (cfg.ledger_mode === undefined && !cfg.calibration_dry_run);
-    if (m.role !== "owner" && isPrepaidBilling && !cfg.calibration_dry_run) {
+    if (m.role !== "owner" && isPrepaidBilling && !cfg.calibration_dry_run && !ruleUnconfirmed) {
       if (cfg.pricing_mode === "weighted_units") {
         chargeFen = Math.round((m.weightedUnits / 1_000_000) * unitPriceMillion);
       } else {
@@ -217,6 +251,7 @@ export function allocateSliceUsage({
       weightedUnits: Math.round(m.weightedUnits * 100) / 100,
       unitPriceFenPerPct: unitPricePct,
       chargeFen,
+      ruleUnconfirmed,
     };
   });
 
@@ -228,10 +263,9 @@ export function allocateSliceUsage({
 }
 
 /**
- * 三层防误报黑洞预警判定器
- *
- * recentUnexplainedDrops: Array<{ capturedAtMs, missingPct }>
- * membersStatus: Array<{ id, name, role, lastSeenAtMs }>
+ * 滚动累计未统计消耗预警判定器
+ * - 允许 0.5%+ 的 90 秒分片未解释缺口进入滚动缓冲，解决匀速慢速偷跑被单次 3% 门槛过滤的漏报问题；
+ * - 仍要求累计缺口达到 warnPct（默认 5%）且满足持续性（>=2 次采样、跨度达标或单次突增 >= critPct），避免单次小抖动误报。
  */
 export function evaluateBlackholeAlert({
   poolKey = "gemini",
@@ -242,17 +276,16 @@ export function evaluateBlackholeAlert({
 } = {}) {
   const cfg = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const winMs = Math.max(5, Number(cfg.blackhole_window_minutes) || 15) * 60 * 1000;
-  const minSingle = Math.max(0.5, Number(cfg.blackhole_min_single_drop_pct) || 3.0);
+  const minSingle = Math.max(0.2, Number(cfg.blackhole_min_single_drop_pct) || 0.5);
   const warnPct = Math.max(2, Number(cfg.blackhole_warn_missing_pct) || 5.0);
   const critPct = Math.max(warnPct + 3, Number(cfg.blackhole_critical_missing_pct) || 15.0);
   const offlineGraceMs = Math.max(3, Number(cfg.offline_grace_minutes) || 12) * 60 * 1000;
 
-  // 第一层滤波：剔除过期记录和低于单次毛刺阈值的微小波动
   const validDrops = (Array.isArray(recentUnexplainedDrops) ? recentUnexplainedDrops : []).filter(
     (d) =>
       d &&
       Number.isFinite(d.capturedAtMs) &&
-      nowMs - d.capturedAtMs <= winMs * 2 &&
+      nowMs - d.capturedAtMs <= winMs * 4 &&
       Number(d.missingPct) >= minSingle
   );
   if (validDrops.length === 0) return null;
@@ -261,14 +294,12 @@ export function evaluateBlackholeAlert({
     Math.round(validDrops.reduce((s, d) => s + Number(d.missingPct || 0), 0) * 100) / 100;
   if (totalMissingPct < warnPct) return null;
 
-  // 第二层滤波：确认并非单帧瞬时抖动（跨度达到窗口要求，或累计缺口已非常显著 >= critPct）
   const earliestMs = Math.min(...validDrops.map((d) => d.capturedAtMs));
   const latestMs = Math.max(...validDrops.map((d) => d.capturedAtMs));
   const spanMs = latestMs - earliestMs;
   const sustained = spanMs >= winMs * 0.5 || validDrops.length >= 2 || totalMissingPct >= critPct;
   if (!sustained) return null;
 
-  // 第三层滤波：按「成员在线状态」区分“可能换设备忘开插件（黄警）”与“全员在线却凭空暴跌（红警疑似反代）”
   const list = Array.isArray(membersStatus) ? membersStatus : [];
   const offlineMembers = list.filter(
     (m) => !m.lastSeenAtMs || nowMs - m.lastSeenAtMs > offlineGraceMs
@@ -283,7 +314,7 @@ export function evaluateBlackholeAlert({
       poolKey,
       missingPct: totalMissingPct,
       title: `${poolLabel}出现较多未统计消耗（约 ${totalMissingPct}%）`,
-      detail: `最近 ${Math.round(Math.max(spanMs, 60000) / 60000)} 分钟内，全组 ${list.length} 位成员的插件均在线且本地上报消耗很低，但官方${poolLabel}总剩余额度下降了 ${totalMissingPct}%。可在群内确认是否有人在未安装插件的设备、命令行工具或第三方转发服务中使用了账号。`,
+      detail: `最近 ${Math.round(Math.max(spanMs, 60000) / 60000)} 分钟内，全组 ${list.length} 位活跃成员的插件均在线且本地上报消耗很低，但官方${poolLabel}总剩余额度下降了 ${totalMissingPct}%。可在群内确认是否有人在未安装插件的设备、命令行工具或第三方转发服务中使用了账号。`,
     };
   }
 
@@ -298,9 +329,4 @@ export function evaluateBlackholeAlert({
       ? `最近出现约 ${totalMissingPct}% 的额度下降未匹配到本地记录，当前有 ${offlineMembers.length} 位成员的插件未在线（${offlineNames}），可能是在未安装插件的设备上使用了账号。`
       : `最近出现约 ${totalMissingPct}% 的额度下降未匹配到本地记录，可能是官方配额刷新延迟，或某台设备尚未开启插件。`,
   };
-}
-
-export function formatYuan(fen = 0) {
-  const n = Number(fen) || 0;
-  return (n / 100).toFixed(2);
 }

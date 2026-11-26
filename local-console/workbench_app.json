@@ -14,7 +14,7 @@
   "healthPath": "/api/health",
   "healthMatch": "agy-family-ledger-console",
   "backendLifecycle": "app_owned",
-  "backendExe": "C:\\Program Files\\nodejs\\node.exe",
+  "backendExe": "node",
   "backendArgs": ["server.mjs"],
   "backendWorkDir": "{APP_DIR}"
 }
