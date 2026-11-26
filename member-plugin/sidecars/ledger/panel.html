@@ -118,10 +118,31 @@
   .bar-fill { height: 100%; border-radius: 99px; transition: width 0.3s ease; }
   .bar-fill.gem { background: var(--amber); }
   .bar-fill.p3 { background: var(--pine); }
+  .floor-marker {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: var(--vermilion); pointer-events: none; z-index: 2;
+  }
   .sub-gauge {
     display: flex; justify-content: space-between; font-size: 12px;
     color: var(--muted); margin-top: 4px; gap: 6px; flex-wrap: wrap;
   }
+  .floor-hint { color: var(--muted); font-size: 12px; }
+  .floor-hint.reached { color: var(--vermilion); font-weight: 700; }
+
+  .rule-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .rule-item {
+    background: var(--paper); border-radius: 8px; padding: 7px 9px;
+    font-size: 12px; line-height: 1.5; color: var(--ink-soft);
+  }
+  .rule-item strong { color: var(--ink); }
+  .scope-pill {
+    display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 4px;
+    font-size: 12px; font-weight: 600; background: var(--pine-soft); color: var(--pine);
+  }
+  .scope-pill.member-only { background: var(--amber-soft); color: #7C4B1F; }
+  .rule-footnote { font-size: 12px; color: var(--muted); margin-top: 7px; }
+  .stat-cell .s.warn { color: var(--amber); font-weight: 600; }
+  .peer-tag.warn { background: var(--amber-soft); color: #7C4B1F; }
 
   .week-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
   .stat-cell {
@@ -146,10 +167,10 @@
     padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 12px;
   }
   .peer-row:last-child { border-bottom: none; padding-bottom: 0; }
-  .peer-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; min-width: 0; }
+  .peer-name { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; font-weight: 600; min-width: 0; }
   .peer-tag {
     font-size: 12px; padding: 0 5px; border-radius: 4px;
-    background: var(--paper); color: var(--muted); font-weight: 500;
+    background: var(--paper); color: var(--muted); font-weight: 500; white-space: nowrap;
   }
   .peer-right { text-align: right; }
   .peer-nums { font-variant-numeric: tabular-nums; color: var(--ink-soft); white-space: nowrap; }
@@ -211,10 +232,10 @@
     </button>
   </div>
 
-  <!-- 规则或单价变动确认提醒（防组长静默改价） -->
+  <!-- 规则、使用约定或单价变动确认提醒（防组长静默修改） -->
   <section class="rule-alert-card" id="rule-change-card" hidden>
-    <div class="rule-alert-title">看板计费规则已更新，需要你确认</div>
-    <div>在你点击确认前，系统不会按新单价自动扣费。</div>
+    <div class="rule-alert-title" id="rule-alert-title">看板规则已更新，需要你确认</div>
+    <div id="rule-alert-desc">在你点击确认前，系统不会按新单价自动扣费。</div>
     <div class="rule-diff-row">
       <div>原约定：<strong id="rule-diff-old">--</strong></div>
       <div>云端新规则：<strong id="rule-diff-new">--</strong></div>
@@ -225,6 +246,9 @@
     </div>
   </section>
 
+  <div class="banner warn" id="banner-convention">
+    <span id="banner-convention-text"></span>
+  </div>
   <div class="banner warn" id="banner-low">
     <span id="banner-low-text"></span>
   </div>
@@ -255,9 +279,13 @@
         <span class="gauge-name"><span class="swatch gem"></span>Gemini 4 池</span>
         <span class="gauge-val">周剩余 <strong id="gem-week-pct">--</strong></span>
       </div>
-      <div class="bar-track"><div class="bar-fill gem" id="gem-week-bar" style="width:0%"></div></div>
+      <div class="bar-track">
+        <div class="bar-fill gem" id="gem-week-bar" style="width:0%"></div>
+        <div class="floor-marker" id="gem-floor-mark" hidden></div>
+      </div>
       <div class="sub-gauge">
         <span>5 小时剩余：<strong id="gem-5h-pct">--</strong></span>
+        <span class="floor-hint" id="gem-floor-hint" hidden></span>
         <span id="gem-reset">重置时间待同步</span>
       </div>
     </div>
@@ -267,12 +295,26 @@
         <span class="gauge-name"><span class="swatch p3"></span>Claude 3P 池</span>
         <span class="gauge-val">周剩余 <strong id="p3-week-pct">--</strong></span>
       </div>
-      <div class="bar-track"><div class="bar-fill p3" id="p3-week-bar" style="width:0%"></div></div>
+      <div class="bar-track">
+        <div class="bar-fill p3" id="p3-week-bar" style="width:0%"></div>
+        <div class="floor-marker" id="p3-floor-mark" hidden></div>
+      </div>
       <div class="sub-gauge">
         <span>5 小时剩余：<strong id="p3-5h-pct">--</strong></span>
+        <span class="floor-hint" id="p3-floor-hint" hidden></span>
         <span id="p3-reset">重置时间待同步</span>
       </div>
     </div>
+  </section>
+
+  <!-- 全组使用约定（仅在组长配置了保留底线、单人参考上限或文字说明时展示） -->
+  <section class="sheet" id="usage-rules-card" hidden>
+    <div class="sheet-head">
+      <span class="label">全组使用约定</span>
+      <span style="font-size:12px;color:var(--muted);" id="usage-rules-ver">v1</span>
+    </div>
+    <div class="rule-list" id="usage-rules-list"></div>
+    <div class="rule-footnote">以上约定仅作全组协作参考，插件不会强行限制使用。</div>
   </section>
 
   <!-- 我的本周期用量（按当前周重置周期计算，重置后自动归零） -->
@@ -320,6 +362,15 @@
     <div class="details-body" id="tx-list">
       <div style="color:var(--muted);font-size:12px;">暂无记录</div>
     </div>
+  </details>
+
+  <!-- 纯看板模式或组长视角下的规则变更记录（有记录时显示，可随时核对历史约定） -->
+  <details id="rule-log-details" hidden>
+    <summary>
+      <span>规则变更记录</span>
+      <span style="color:var(--muted);font-weight:400;" id="rule-log-count">0 条</span>
+    </summary>
+    <div class="details-body" id="rule-log-list"></div>
   </details>
 
   <!-- 连接设置（日常收起） -->
@@ -416,6 +467,13 @@ function render(state) {
   const rm = state.ruleMismatch;
   $("rule-change-card").hidden = !Boolean(state.configured && rm && rm.mismatch);
   if (rm && rm.mismatch) {
+    if (rm.isBoardOnlyChange) {
+      $("rule-alert-title").textContent = "全组使用约定已更新，请查看并确认";
+      $("rule-alert-desc").textContent = "组长调整了共享使用约定。以下为调整前后对比，确认后将更新本机约定记录。";
+    } else {
+      $("rule-alert-title").textContent = "看板规则或单价已更新，需要你确认";
+      $("rule-alert-desc").textContent = "在你点击确认前，系统不会按新单价自动扣费。";
+    }
     $("rule-diff-old").textContent = rm.agreedSummary || "原约定规则";
     $("rule-diff-new").textContent = rm.currentSummary || "云端新规则";
   }
@@ -423,20 +481,97 @@ function render(state) {
   if (!mv) return;
 
   const isPrepaid = mv.pricing?.ledgerMode === "prepaid";
+  const ur = mv.usageRules || {};
+  const floorPct = Number(ur.poolReserveFloorPct || 0);
+  const capPct = Number(ur.memberWeeklyCapPct || 0);
+  const fmtLimit = (v) => (Number.isInteger(v) ? v + "%" : v.toFixed(1) + "%");
+
   $("family-title").textContent = mv.pricing?.familyName || "家庭组额度看板";
   $("member-name-badge").textContent = mv.name + (mv.role === "owner" ? "（组长）" : "");
 
   $("my-gem-pct").textContent = (mv.weekSummary?.geminiPct || 0).toFixed(2) + "%";
   $("my-3p-pct").textContent = (mv.weekSummary?.thirdPartyPct || 0).toFixed(2) + "%";
 
-  $("my-gem-cost").hidden = !isPrepaid;
-  $("my-3p-cost").hidden = !isPrepaid;
+  const capApplies = Boolean(ur.memberCap?.applies && capPct > 0);
+  const gemSubParts = [];
+  const p3SubParts = [];
+  if (isPrepaid) {
+    gemSubParts.push(mv.role === "owner" ? "组长免计费" : yuan(mv.weekSummary?.geminiChargeFen));
+    p3SubParts.push(mv.role === "owner" ? "组长免计费" : yuan(mv.weekSummary?.thirdPartyChargeFen));
+  }
+  if (capApplies) {
+    gemSubParts.push(ur.memberCap?.geminiReached ? "已达上限 " + fmtLimit(capPct) : "上限参考 " + fmtLimit(capPct));
+    p3SubParts.push(ur.memberCap?.thirdPartyReached ? "已达上限 " + fmtLimit(capPct) : "上限参考 " + fmtLimit(capPct));
+  }
+  $("my-gem-cost").hidden = gemSubParts.length === 0;
+  $("my-3p-cost").hidden = p3SubParts.length === 0;
+  $("my-gem-cost").textContent = gemSubParts.join(" · ");
+  $("my-3p-cost").textContent = p3SubParts.join(" · ");
+  $("my-gem-cost").className = "s" + (ur.memberCap?.geminiReached ? " warn" : "");
+  $("my-3p-cost").className = "s" + (ur.memberCap?.thirdPartyReached ? " warn" : "");
+
   $("prepaid-strip").hidden = !isPrepaid || mv.role === "owner";
   $("tx-details").hidden = !isPrepaid || mv.role === "owner";
 
+  // 温和的使用约定实时提醒（总池触及保留底线 / 个人接近或达到参考上限）
+  const convNotices = [];
+  if (ur.poolFloor?.geminiReached) {
+    convNotices.push(
+      "Gemini 4 周剩余 " + pctText(ur.poolFloor.geminiRemainingPct) + "，已触及全组约定的 " + fmtLimit(floorPct) + " 保留底线，建议暂缓重任务。"
+    );
+  }
+  if (ur.poolFloor?.thirdPartyReached) {
+    convNotices.push(
+      "Claude 3P 周剩余 " + pctText(ur.poolFloor.thirdPartyRemainingPct) + "，已触及全组约定的 " + fmtLimit(floorPct) + " 保留底线，建议暂缓重任务。"
+    );
+  }
+  if (ur.memberCap?.geminiReached) {
+    convNotices.push(
+      "你本周期 Gemini 已用 " + Number(ur.memberCap.geminiPct || 0).toFixed(1) + "%，已达约定的单人参考上限（" + fmtLimit(capPct) + "）。"
+    );
+  } else if (ur.memberCap?.geminiApproaching) {
+    convNotices.push(
+      "你本周期 Gemini 已用 " + Number(ur.memberCap.geminiPct || 0).toFixed(1) + "%，已接近约定的单人参考上限（" + fmtLimit(capPct) + "）。"
+    );
+  }
+  if (ur.memberCap?.thirdPartyReached) {
+    convNotices.push(
+      "你本周期 Claude 3P 已用 " + Number(ur.memberCap.thirdPartyPct || 0).toFixed(1) + "%，已达约定的单人参考上限（" + fmtLimit(capPct) + "）。"
+    );
+  } else if (ur.memberCap?.thirdPartyApproaching) {
+    convNotices.push(
+      "你本周期 Claude 3P 已用 " + Number(ur.memberCap.thirdPartyPct || 0).toFixed(1) + "%，已接近约定的单人参考上限（" + fmtLimit(capPct) + "）。"
+    );
+  }
+  $("banner-convention").classList.toggle("show", convNotices.length > 0);
+  $("banner-convention-text").textContent = convNotices.join(" ");
+
+  // 全组使用约定卡片（仅当组长配置了至少一项约定时显示）
+  $("usage-rules-card").hidden = !Boolean(ur.hasUsageRules);
+  if (ur.hasUsageRules) {
+    const rVer = Number(mv.pricing?.ruleVersion || 1);
+    const statusLabel = mv.role === "owner" ? "组长视角" : mv.needsRuleConfirm || (rm && rm.mismatch) ? "待确认" : "已确认";
+    $("usage-rules-ver").textContent = "v" + rVer + " · " + statusLabel;
+    const ruleItems = [];
+    if (floorPct > 0) {
+      ruleItems.push(
+        '<div class="rule-item"><strong>总池保留底线：</strong>周剩余降至 <strong>' + fmtLimit(floorPct) + "</strong> 时暂停非紧急任务</div>"
+      );
+    }
+    if (capPct > 0) {
+      const scopeCls = ur.applyCapToOwner === false ? "scope-pill member-only" : "scope-pill";
+      const scopeTxt = ur.applyCapToOwner === false ? "适用于普通成员" : "全员同等适用";
+      ruleItems.push(
+        '<div class="rule-item"><strong>单人周期参考上限：</strong><strong>' + fmtLimit(capPct) + '</strong><span class="' + scopeCls + '">' + scopeTxt + "</span></div>"
+      );
+    }
+    if (ur.usageRuleNote) {
+      ruleItems.push('<div class="rule-item"><strong>补充说明：</strong>' + esc(ur.usageRuleNote) + "</div>");
+    }
+    $("usage-rules-list").innerHTML = ruleItems.join("");
+  }
+
   if (isPrepaid) {
-    $("my-gem-cost").textContent = mv.role === "owner" ? "组长免计费" : yuan(mv.weekSummary?.geminiChargeFen);
-    $("my-3p-cost").textContent = mv.role === "owner" ? "组长免计费" : yuan(mv.weekSummary?.thirdPartyChargeFen);
     if (mv.role !== "owner") {
       const balEl = $("balance-display");
       balEl.textContent = yuan(mv.balanceFen);
@@ -470,6 +605,19 @@ function render(state) {
   $("p3-5h-pct").textContent = pctText(p35?.remainingPct);
   $("p3-reset").textContent = fmtReset(p3W?.resetAt);
 
+  $("gem-floor-mark").hidden = !(floorPct > 0);
+  $("p3-floor-mark").hidden = !(floorPct > 0);
+  $("gem-floor-hint").hidden = !(floorPct > 0);
+  $("p3-floor-hint").hidden = !(floorPct > 0);
+  if (floorPct > 0) {
+    $("gem-floor-mark").style.left = floorPct + "%";
+    $("p3-floor-mark").style.left = floorPct + "%";
+    $("gem-floor-hint").textContent = ur.poolFloor?.geminiReached ? "已达保留线 " + fmtLimit(floorPct) : "保留线 " + fmtLimit(floorPct);
+    $("gem-floor-hint").className = "floor-hint" + (ur.poolFloor?.geminiReached ? " reached" : "");
+    $("p3-floor-hint").textContent = ur.poolFloor?.thirdPartyReached ? "已达保留线 " + fmtLimit(floorPct) : "保留线 " + fmtLimit(floorPct);
+    $("p3-floor-hint").className = "floor-hint" + (ur.poolFloor?.thirdPartyReached ? " reached" : "");
+  }
+
   const peers = Array.isArray(mv.peers) ? mv.peers : [];
   $("peers-card").hidden = peers.length === 0;
   if (peers.length > 0) {
@@ -477,6 +625,7 @@ function render(state) {
       .map((p) => {
         const dotCls = p.online ? "dot ok" : "dot";
         const tag = p.isSelf ? "我" : p.role === "owner" ? "组长" : "";
+        const capBadge = p.capReached ? '<span class="peer-tag warn">达上限</span>' : "";
         const h5Parts = [];
         if (Number(p.recent5hGeminiShare || 0) > 0) h5Parts.push("Gemini " + Number(p.recent5hGeminiShare).toFixed(0) + "%");
         if (Number(p.recent5hThirdPartyShare || 0) > 0) h5Parts.push("3P " + Number(p.recent5hThirdPartyShare).toFixed(0) + "%");
@@ -484,12 +633,27 @@ function render(state) {
         return (
           '<div class="peer-row">' +
           '<div class="peer-name"><span class="' + dotCls + '"></span><span>' + esc(p.name) + "</span>" +
-          (tag ? '<span class="peer-tag">' + tag + "</span>" : "") +
+          (tag ? '<span class="peer-tag">' + tag + "</span>" : "") + capBadge +
           "</div>" +
           '<div class="peer-right"><div class="peer-nums">Gemini ' + Number(p.geminiPct || 0).toFixed(1) + "% · 3P " + Number(p.thirdPartyPct || 0).toFixed(1) + "%</div>" + h5Line + "</div>" +
           "</div>"
         );
       })
+      .join("");
+  }
+
+  const rcsAll = mv.recentRuleChanges || [];
+  const showStandaloneRuleLog = (!isPrepaid || mv.role === "owner") && rcsAll.length > 0;
+  $("rule-log-details").hidden = !showStandaloneRuleLog;
+  if (showStandaloneRuleLog) {
+    $("rule-log-count").textContent = rcsAll.length + " 条";
+    $("rule-log-list").innerHTML = rcsAll
+      .slice(0, 6)
+      .map(
+        (r) =>
+          '<div class="tx-row"><div><div>v' + Number(r.rule_version) + "：" + esc(r.next_summary) +
+          '</div><div style="color:var(--muted)">' + fmtShortTime(r.created_at) + " · 原为：" + esc(r.prev_summary) + "</div></div></div>"
+      )
       .join("");
   }
 

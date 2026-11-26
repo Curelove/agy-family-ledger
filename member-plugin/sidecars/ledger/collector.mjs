@@ -1,5 +1,5 @@
 /**
- * 成员端零隐私侵入数据采集器 (v1.2.0 · Windows / macOS / Linux 全平台零依赖)
+ * 成员端零隐私侵入数据采集器 (v1.3.0 · Windows / macOS / Linux 全平台零依赖)
  *
  * 严格隐私边界：
  * 1. 读取本机 Antigravity 会话日志 transcript.jsonl 时，仅读取顶层纯数字 Token 计数、模型名、步数索引与时间戳，
@@ -14,7 +14,7 @@ import http from "node:http";
 import tls from "node:tls";
 import crypto from "node:crypto";
 
-const CLIENT_VERSION = "1.2.0";
+const CLIENT_VERSION = "1.3.0";
 const MAX_PENDING_QUEUE = 1500;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES_PER_POLL = 8 * 1024 * 1024;
@@ -36,19 +36,70 @@ function isPrivateLanHost(hostname = "") {
   return false;
 }
 
+function normalizePctLimit(val, max = 100) {
+  const n = Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const clamped = Math.min(max, Math.max(0, n));
+  return Math.round(clamped * 10) / 10;
+}
+
+function sanitizeUsageRuleNote(note = "") {
+  return String(note ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 180);
+}
+
+export function computeRuleNoteHash(note = "") {
+  const clean = sanitizeUsageRuleNote(note);
+  if (!clean) return "";
+  const bytes = new TextEncoder().encode(clean);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < bytes.length; i++) {
+    h1 ^= bytes[i];
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= bytes[i] ^ ((i * 31) & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return (h1 >>> 0).toString(16).padStart(8, "0").slice(0, 4) + (h2 >>> 0).toString(16).padStart(8, "0").slice(0, 4);
+}
+
+function fmtPctLabel(n) {
+  const v = Number(n) || 0;
+  return Number.isInteger(v) ? `${v}%` : `${v.toFixed(1)}%`;
+}
+
 export function formatAgreedRuleSummary(rules) {
   if (!rules || typeof rules !== "object") return "未记录初始约定";
+  const floor = normalizePctLimit(rules.poolReserveFloorPct, 95);
+  const cap = normalizePctLimit(rules.memberWeeklyCapPct, 100);
+  const applyOwner = rules.applyCapToOwner !== false;
+  const note = sanitizeUsageRuleNote(rules.usageRuleNote);
+  const noteHash = String(rules.usageRuleNoteHash || "").trim();
+
+  const convParts = [];
+  if (floor > 0) convParts.push(`总池剩余 ${fmtPctLabel(floor)} 时暂停非紧急任务`);
+  if (cap > 0) convParts.push(`单人每周期上限 ${fmtPctLabel(cap)}（${applyOwner ? "全员同等适用" : "适用于普通成员"}）`);
+  if (note) convParts.push(`补充说明：${note.length > 40 ? note.slice(0, 40) + "…" : note}`);
+  else if (noteHash) convParts.push("含文字补充约定");
+  const convSummary = convParts.join("；");
+
+  let base = "";
   if (rules.ledgerMode !== "prepaid") {
-    return "纯看板模式（仅统计用量占比，不计费用）";
+    base = convSummary ? "纯看板模式" : "纯看板模式（仅统计用量占比，不计费用）";
+  } else {
+    const g = ((Number(rules.geminiFenPerWeeklyPct) || 100) / 100).toFixed(2);
+    const p = ((Number(rules.thirdPartyFenPerWeeklyPct) || 180) / 100).toFixed(2);
+    base = `按量记账模式（Gemini ¥${g}/1%，Claude 3P ¥${p}/1%）`;
   }
-  const g = ((Number(rules.geminiFenPerWeeklyPct) || 100) / 100).toFixed(2);
-  const p = ((Number(rules.thirdPartyFenPerWeeklyPct) || 180) / 100).toFixed(2);
-  return `按量记账模式（Gemini ¥${g}/1%，Claude 3P ¥${p}/1%）`;
+  return convSummary ? `${base}｜约定：${convSummary}` : base;
 }
 
 /**
- * 构造含初始规则约定的纯文本绑定码：
- * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>
+ * 构造含初始规则与全组使用约定的纯文本绑定码：
+ * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>[&rf=<floor>&mc=<cap>&ao=<1|0>&nh=<hash>]
  */
 export function buildInviteCode({
   serverUrl = "",
@@ -57,6 +108,10 @@ export function buildInviteCode({
   ledgerMode = "board_only",
   geminiFenPerWeeklyPct = 100,
   thirdPartyFenPerWeeklyPct = 180,
+  poolReserveFloorPct = 0,
+  memberWeeklyCapPct = 0,
+  applyCapToOwner = true,
+  usageRuleNote = "",
 } = {}) {
   const cleanUrl = String(serverUrl || "").trim().replace(/\/+$/, "");
   const cleanToken = String(memberToken || "").trim();
@@ -64,11 +119,21 @@ export function buildInviteCode({
   const v = Math.max(1, Math.round(Number(ruleVersion) || 1));
   const g = Math.max(0, Math.round(Number(geminiFenPerWeeklyPct) || 100));
   const p = Math.max(0, Math.round(Number(thirdPartyFenPerWeeklyPct) || 180));
-  return `${cleanUrl}#${cleanToken}&v=${v}&m=${modeShort}&g=${g}&p=${p}`;
+  const rf = normalizePctLimit(poolReserveFloorPct, 95);
+  const mc = normalizePctLimit(memberWeeklyCapPct, 100);
+  const ao = applyCapToOwner === false ? 0 : 1;
+  const nh = computeRuleNoteHash(usageRuleNote);
+
+  let frag = `${cleanToken}&v=${v}&m=${modeShort}&g=${g}&p=${p}`;
+  if (rf > 0 || mc > 0 || ao === 0 || nh) {
+    frag += `&rf=${rf}&mc=${mc}&ao=${ao}`;
+    if (nh) frag += `&nh=${nh}`;
+  }
+  return `${cleanUrl}#${frag}`;
 }
 
 /**
- * 解析单行纯文本绑定码（兼容旧版 https://域名#agf_xxxx 与新版含规则约定后缀）
+ * 解析单行纯文本绑定码（兼容旧版 https://域名#agf_xxxx、v1.2.0 与 v1.3.0 含使用约定后缀）
  * 安全约束：公网地址强制要求 https://，拦截私网 LAN 与非 loopback 的明文 http://
  */
 export function parseInviteCode(raw = "") {
@@ -111,12 +176,21 @@ export function parseInviteCode(raw = "") {
     const rawM = params.get("m");
     const rawG = Number(params.get("g"));
     const rawP = Number(params.get("p"));
+    const rawRf = params.get("rf");
+    const rawMc = params.get("mc");
+    const rawAo = params.get("ao");
+    const rawNh = String(params.get("nh") || "").trim().toLowerCase();
     if (Number.isFinite(rawV) && rawV >= 1 && (rawM === "board" || rawM === "prepaid")) {
       agreedRules = {
         ruleVersion: Math.round(rawV),
         ledgerMode: rawM === "prepaid" ? "prepaid" : "board_only",
         geminiFenPerWeeklyPct: Number.isFinite(rawG) && rawG >= 0 ? Math.round(rawG) : 100,
         thirdPartyFenPerWeeklyPct: Number.isFinite(rawP) && rawP >= 0 ? Math.round(rawP) : 180,
+        poolReserveFloorPct: rawRf !== null ? normalizePctLimit(rawRf, 95) : 0,
+        memberWeeklyCapPct: rawMc !== null ? normalizePctLimit(rawMc, 100) : 0,
+        applyCapToOwner: rawAo === "0" ? false : true,
+        usageRuleNote: "",
+        usageRuleNoteHash: /^[0-9a-f]{8}$/.test(rawNh) ? rawNh : "",
         agreedAt: new Date().toISOString(),
         source: "invite_code",
       };
@@ -138,11 +212,14 @@ export function evaluateRuleMismatch(agreedRules, memberView) {
   const serverPricing = memberView.pricing;
   const serverVersion = Math.max(1, Number(serverPricing.ruleVersion) || 1);
   const serverNeedsConfirm = Boolean(memberView.needsRuleConfirm);
+  const isBoardOnlyChange =
+    serverPricing.ledgerMode !== "prepaid" && (!agreedRules || agreedRules.ledgerMode !== "prepaid");
 
   if (!agreedRules) {
     if (serverNeedsConfirm) {
       return {
         mismatch: true,
+        isBoardOnlyChange,
         agreedRuleVersion: Number(memberView.acceptedRuleVersion || 1),
         serverRuleVersion: serverVersion,
         agreedSummary: "入组初始规则",
@@ -159,9 +236,27 @@ export function evaluateRuleMismatch(agreedRules, memberView) {
     (Number(agreedRules.geminiFenPerWeeklyPct) !== Number(serverPricing.geminiFenPerWeeklyPct) ||
       Number(agreedRules.thirdPartyFenPerWeeklyPct) !== Number(serverPricing.thirdPartyFenPerWeeklyPct));
 
-  if (serverNeedsConfirm || modeDiff || priceDiff || serverVersion > localVer) {
+  const localFloor = normalizePctLimit(agreedRules.poolReserveFloorPct, 95);
+  const serverFloor = normalizePctLimit(serverPricing.poolReserveFloorPct, 95);
+  const localCap = normalizePctLimit(agreedRules.memberWeeklyCapPct, 100);
+  const serverCap = normalizePctLimit(serverPricing.memberWeeklyCapPct, 100);
+  const localApplyOwner = agreedRules.applyCapToOwner !== false;
+  const serverApplyOwner = serverPricing.applyCapToOwner !== false;
+  const localNoteHash =
+    String(agreedRules.usageRuleNoteHash || "").trim() || computeRuleNoteHash(agreedRules.usageRuleNote || "");
+  const serverNoteHash =
+    String(serverPricing.usageRuleNoteHash || "").trim() || computeRuleNoteHash(serverPricing.usageRuleNote || "");
+
+  const conventionDiff =
+    localFloor !== serverFloor ||
+    localCap !== serverCap ||
+    (serverCap > 0 && localApplyOwner !== serverApplyOwner) ||
+    localNoteHash !== serverNoteHash;
+
+  if (serverNeedsConfirm || modeDiff || priceDiff || conventionDiff || serverVersion > localVer) {
     return {
       mismatch: true,
+      isBoardOnlyChange: !modeDiff && serverPricing.ledgerMode !== "prepaid",
       agreedRuleVersion: localVer,
       serverRuleVersion: serverVersion,
       agreedSummary: formatAgreedRuleSummary(agreedRules),
@@ -902,6 +997,11 @@ export class MemberLedgerCollector {
             ledgerMode: p.ledgerMode === "prepaid" ? "prepaid" : "board_only",
             geminiFenPerWeeklyPct: Number(p.geminiFenPerWeeklyPct) || 100,
             thirdPartyFenPerWeeklyPct: Number(p.thirdPartyFenPerWeeklyPct) || 180,
+            poolReserveFloorPct: normalizePctLimit(p.poolReserveFloorPct, 95),
+            memberWeeklyCapPct: normalizePctLimit(p.memberWeeklyCapPct, 100),
+            applyCapToOwner: p.applyCapToOwner !== false,
+            usageRuleNote: sanitizeUsageRuleNote(p.usageRuleNote || ""),
+            usageRuleNoteHash: String(p.usageRuleNoteHash || "") || computeRuleNoteHash(p.usageRuleNote || ""),
             agreedAt: new Date().toISOString(),
             source: "member_confirmed",
           },
@@ -989,10 +1089,68 @@ export class MemberLedgerCollector {
               ledgerMode: p.ledgerMode === "prepaid" ? "prepaid" : "board_only",
               geminiFenPerWeeklyPct: Number(p.geminiFenPerWeeklyPct) || 100,
               thirdPartyFenPerWeeklyPct: Number(p.thirdPartyFenPerWeeklyPct) || 180,
+              poolReserveFloorPct: normalizePctLimit(p.poolReserveFloorPct, 95),
+              memberWeeklyCapPct: normalizePctLimit(p.memberWeeklyCapPct, 100),
+              applyCapToOwner: p.applyCapToOwner !== false,
+              usageRuleNote: sanitizeUsageRuleNote(p.usageRuleNote || ""),
+              usageRuleNoteHash: String(p.usageRuleNoteHash || "") || computeRuleNoteHash(p.usageRuleNote || ""),
               agreedAt: new Date().toISOString(),
               source: "first_sync_snapshot",
             },
           });
+        } else if (
+          this.config.agreedRules &&
+          data.member.pricing &&
+          data.member.role !== "owner"
+        ) {
+          const p = data.member.pricing;
+          const ar = this.config.agreedRules;
+          if (
+            !ar.usageRuleNote &&
+            ar.usageRuleNoteHash &&
+            p.usageRuleNote &&
+            computeRuleNoteHash(p.usageRuleNote) === ar.usageRuleNoteHash
+          ) {
+            // 若绑定码仅携带了文字说明短哈希且与服务端原文一致，补存原文便于日后变动对比
+            this.saveConfig({
+              agreedRules: {
+                ...ar,
+                usageRuleNote: sanitizeUsageRuleNote(p.usageRuleNote),
+              },
+            });
+          }
+
+          // 若成员刚通过新版绑定码入组，且绑定码中锁定的版本号与全部计费/约定参数与云端 100% 一致，
+          // 自动同步服务端 accepted_rule_version，避免弹出“原约定与云端新规则完全一样”的重复确认卡片；
+          // 只要云端有任何一项参数与绑定码不符或版本号更新，绝不自动确认。
+          const checkWithoutServerFlag = evaluateRuleMismatch(this.config.agreedRules, {
+            ...data.member,
+            needsRuleConfirm: false,
+          });
+          if (
+            ar.source === "invite_code" &&
+            data.member.needsRuleConfirm &&
+            !checkWithoutServerFlag.mismatch &&
+            Number(ar.ruleVersion) === Number(p.ruleVersion)
+          ) {
+            try {
+              const confRes = await postJsonRequest(
+                `${this.config.serverUrl.replace(/\/+$/, "")}/api/member/confirm-rules`,
+                {
+                  "User-Agent": `AgyFamilyLedger/${CLIENT_VERSION}`,
+                  "Content-Type": "application/json",
+                  "X-Member-Token": this.config.memberToken,
+                },
+                { ruleVersion: Number(ar.ruleVersion) },
+                { proxyUrl: this.config.proxyUrl, timeoutMs: 8000 }
+              );
+              if (confRes.ok && confRes.data?.ok && confRes.data.member) {
+                this.state.lastMemberView = confRes.data.member;
+              }
+            } catch {
+              // 自动对齐失败不影响主流程，用户仍可手动点击确认
+            }
+          }
         }
       }
       this.saveState();

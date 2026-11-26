@@ -1,5 +1,5 @@
 /**
- * 官方纯净成员插件自动打包脚本 (v1.2.0 · 供 GitHub Actions 与本地检验共用)
+ * 官方纯净成员插件自动打包脚本 (v1.3.0 · 供 GitHub Actions 与本地检验共用)
  *
  * 产出：
  * - dist/agy-family-ledger-plugin-v<version>.zip（不含任何私人网址或成员凭证）

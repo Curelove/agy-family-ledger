@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 核心纯函数计算引擎 (v1.2.0)
+ * Antigravity 家庭组共享额度看板 · 核心纯函数计算引擎 (v1.3.0)
  *
  * 设计原则：
  * 1. 所有金额使用整数「分」（100 分 = 1.00 元），避免浮点精度误差。
@@ -8,6 +8,7 @@
  *    并对单人可解释上限设置合理边界，防止未装插件设备的消耗转嫁给在线成员。
  * 4. 自动识别官方配额重置（含离线跨重置周期后的新周期首段消耗），绝不产生负数扣费。
  * 5. 未统计消耗预警采用滚动累计窗口，既能捕捉 90 秒心跳下的持续慢速偷跑，又避免单次小抖动误报。
+ * 6. 全组使用约定（总池保留底线、单人周期参考上限、适用范围与补充说明）纳入同一套规则版本锁定机制，防暗改、防双标。
  */
 
 export const SLICE_MS = 5 * 60 * 1000; // 5 分钟统计切片
@@ -15,7 +16,7 @@ export const SLICE_MS = 5 * 60 * 1000; // 5 分钟统计切片
 export const DEFAULT_SETTINGS = {
   family_name: "家庭组共享额度看板",
   ledger_mode: "board_only", // 'board_only'（纯看板）| 'prepaid'（按量记账）
-  rule_version: 1, // 规则版本号：每次修改记账方式或单价自动 +1，成员端据此核对约定
+  rule_version: 1, // 规则版本号：每次修改记账方式、单价或全组使用约定自动 +1，成员端据此核对
   pricing_mode: "weekly_pct", // 'weekly_pct'（按周池百分比折算）| 'weighted_units'（按等效百万单位折算）
   gemini_fen_per_weekly_pct: 100, // Gemini 周池每消耗 1% = 1.00 元（仅 prepaid 模式生效）
   third_party_fen_per_weekly_pct: 180, // Claude 3P 周池每消耗 1% = 1.80 元
@@ -24,6 +25,11 @@ export const DEFAULT_SETTINGS = {
   default_low_balance_fen: 200,
   expected_units_per_pct_gemini: 400_000,
   expected_units_per_pct_3p: 250_000,
+  // 全组共享使用约定（0 或空字符串表示不启用，不额外占用界面）
+  pool_reserve_floor_pct: 0, // 总池保留底线（周剩余 %，例如 20 表示剩余降至 20% 时提醒暂停重任务）
+  member_weekly_cap_pct: 0, // 单人本周期参考上限（%，例如双人组 50、三人组 30）
+  apply_cap_to_owner: true, // 单人上限是否对组长本人同样生效（默认开启，成员侧边栏如实公示适用范围）
+  usage_rule_note: "", // 可选补充文字约定（最多 180 字）
   // 未统计掉量滚动滤波阈值（0.5% 以上进入累计窗口，累计达到提醒线才告警）
   blackhole_min_single_drop_pct: 0.5,
   blackhole_window_minutes: 15,
@@ -109,21 +115,158 @@ export function deriveWeekBucket(resetAt = "", nowMs = Date.now()) {
 }
 
 /**
- * 格式化可读规则摘要（用于审计日志与成员端变价对比）
+ * 归一化百分比上限/底线值（0 表示不启用，最多保留 1 位小数）
+ */
+export function normalizePctLimit(val, max = 100) {
+  const n = Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const clamped = Math.min(max, Math.max(0, n));
+  return Math.round(clamped * 10) / 10;
+}
+
+/**
+ * 清洗全组补充约定文字（单行、最多 180 字）
+ */
+export function sanitizeUsageRuleNote(note = "") {
+  return String(note ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 180);
+}
+
+/**
+ * 纯标准 JS 同步短指纹（零 Node 专有依赖，Worker 与成员端算法完全一致，用于绑定码防暗改校验）
+ */
+export function computeRuleNoteHash(note = "") {
+  const clean = sanitizeUsageRuleNote(note);
+  if (!clean) return "";
+  const bytes = new TextEncoder().encode(clean);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < bytes.length; i++) {
+    h1 ^= bytes[i];
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= bytes[i] ^ ((i * 31) & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return (h1 >>> 0).toString(16).padStart(8, "0").slice(0, 4) + (h2 >>> 0).toString(16).padStart(8, "0").slice(0, 4);
+}
+
+function fmtPctLabel(n) {
+  const v = Number(n) || 0;
+  return Number.isInteger(v) ? `${v}%` : `${v.toFixed(1)}%`;
+}
+
+/**
+ * 格式化全组使用约定摘要（空表示未配置任何使用约定）
+ */
+export function formatUsageConventionSummary(settings = DEFAULT_SETTINGS) {
+  const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  const floor = normalizePctLimit(s.pool_reserve_floor_pct, 95);
+  const cap = normalizePctLimit(s.member_weekly_cap_pct, 100);
+  const applyOwner = s.apply_cap_to_owner !== false;
+  const note = sanitizeUsageRuleNote(s.usage_rule_note);
+
+  const parts = [];
+  if (floor > 0) {
+    parts.push(`总池剩余 ${fmtPctLabel(floor)} 时暂停非紧急任务`);
+  }
+  if (cap > 0) {
+    parts.push(`单人每周期上限 ${fmtPctLabel(cap)}（${applyOwner ? "全员同等适用" : "适用于普通成员"}）`);
+  }
+  if (note) {
+    parts.push(`补充说明：${note.length > 40 ? note.slice(0, 40) + "…" : note}`);
+  }
+  return parts.join("；");
+}
+
+/**
+ * 计算全组使用约定在当前水位与个人用量下的实时提醒状态
+ */
+export function evaluateUsageRulesStatus({
+  settings = DEFAULT_SETTINGS,
+  pools = {},
+  weekSummary = {},
+  role = "member",
+} = {}) {
+  const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  const poolReserveFloorPct = normalizePctLimit(s.pool_reserve_floor_pct, 95);
+  const memberWeeklyCapPct = normalizePctLimit(s.member_weekly_cap_pct, 100);
+  const applyCapToOwner = s.apply_cap_to_owner !== false;
+  const usageRuleNote = sanitizeUsageRuleNote(s.usage_rule_note);
+  const usageRuleNoteHash = computeRuleNoteHash(usageRuleNote);
+  const hasUsageRules = poolReserveFloorPct > 0 || memberWeeklyCapPct > 0 || Boolean(usageRuleNote);
+
+  const gemRemRaw = pools?.gemini?.weekly?.remainingPct;
+  const p3RemRaw = pools?.["3p"]?.weekly?.remainingPct;
+  const geminiRemainingPct = typeof gemRemRaw === "number" && Number.isFinite(gemRemRaw) ? gemRemRaw : null;
+  const thirdPartyRemainingPct = typeof p3RemRaw === "number" && Number.isFinite(p3RemRaw) ? p3RemRaw : null;
+
+  const geminiFloorReached =
+    poolReserveFloorPct > 0 && geminiRemainingPct !== null && geminiRemainingPct <= poolReserveFloorPct;
+  const thirdPartyFloorReached =
+    poolReserveFloorPct > 0 && thirdPartyRemainingPct !== null && thirdPartyRemainingPct <= poolReserveFloorPct;
+
+  const capApplies = memberWeeklyCapPct > 0 && (role !== "owner" || applyCapToOwner);
+  const gUsed = Math.max(0, Number(weekSummary?.geminiPct || 0));
+  const pUsed = Math.max(0, Number(weekSummary?.thirdPartyPct || 0));
+  const nearThreshold = memberWeeklyCapPct * 0.85;
+
+  const geminiReached = capApplies && gUsed >= memberWeeklyCapPct;
+  const thirdPartyReached = capApplies && pUsed >= memberWeeklyCapPct;
+  const geminiApproaching = capApplies && !geminiReached && gUsed >= nearThreshold;
+  const thirdPartyApproaching = capApplies && !thirdPartyReached && pUsed >= nearThreshold;
+
+  return {
+    poolReserveFloorPct,
+    memberWeeklyCapPct,
+    applyCapToOwner,
+    usageRuleNote,
+    usageRuleNoteHash,
+    hasUsageRules,
+    summaryText: formatUsageConventionSummary(s),
+    poolFloor: {
+      geminiReached: geminiFloorReached,
+      thirdPartyReached: thirdPartyFloorReached,
+      anyReached: geminiFloorReached || thirdPartyFloorReached,
+      geminiRemainingPct,
+      thirdPartyRemainingPct,
+    },
+    memberCap: {
+      capPct: memberWeeklyCapPct,
+      applies: capApplies,
+      geminiPct: gUsed,
+      thirdPartyPct: pUsed,
+      geminiReached,
+      thirdPartyReached,
+      geminiApproaching,
+      thirdPartyApproaching,
+      anyReached: geminiReached || thirdPartyReached,
+      anyApproaching: geminiApproaching || thirdPartyApproaching,
+    },
+  };
+}
+
+/**
+ * 格式化可读规则摘要（用于审计日志、邀请说明与成员端变更对比）
  */
 export function formatPricingRuleSummary(settings = DEFAULT_SETTINGS) {
   const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  const convSummary = formatUsageConventionSummary(s);
+  let base = "";
   if (s.ledger_mode !== "prepaid") {
-    return "纯看板模式（仅统计用量占比，不计费用）";
-  }
-  const gYuan = ((Number(s.gemini_fen_per_weekly_pct) || 100) / 100).toFixed(2);
-  const pYuan = ((Number(s.third_party_fen_per_weekly_pct) || 180) / 100).toFixed(2);
-  if (s.pricing_mode === "weighted_units") {
+    base = convSummary ? "纯看板模式" : "纯看板模式（仅统计用量占比，不计费用）";
+  } else if (s.pricing_mode === "weighted_units") {
     const gm = ((Number(s.gemini_fen_per_million_units) || 80) / 100).toFixed(2);
     const pm = ((Number(s.third_party_fen_per_million_units) || 200) / 100).toFixed(2);
-    return `按量记账模式（按等效单位：Gemini ¥${gm}/百万，3P ¥${pm}/百万）`;
+    base = `按量记账模式（按等效单位：Gemini ¥${gm}/百万，3P ¥${pm}/百万）`;
+  } else {
+    const gYuan = ((Number(s.gemini_fen_per_weekly_pct) || 100) / 100).toFixed(2);
+    const pYuan = ((Number(s.third_party_fen_per_weekly_pct) || 180) / 100).toFixed(2);
+    base = `按量记账模式（Gemini ¥${gYuan}/1%，Claude 3P ¥${pYuan}/1%）`;
   }
-  return `按量记账模式（Gemini ¥${gYuan}/1%，Claude 3P ¥${pYuan}/1%）`;
+  return convSummary ? `${base}｜约定：${convSummary}` : base;
 }
 
 /**

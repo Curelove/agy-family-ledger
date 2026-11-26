@@ -75,9 +75,11 @@
             <div class="scale-track" aria-label="Gemini 周剩余百分比">
               <div class="scale-fill gem" id="ov-gem-week-bar" style="width:0%"></div>
               <div class="scale-ticks" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+              <div class="floor-marker" id="ov-gem-floor-mark" hidden></div>
             </div>
             <div class="meter-foot">
               <span>5 小时窗口剩余：<strong id="ov-gem-5h-pct">--</strong></span>
+              <span class="floor-foot" id="ov-gem-floor-foot" hidden></span>
               <span id="ov-gem-reset">等待组长插件同步</span>
             </div>
           </div>
@@ -98,12 +100,26 @@
             <div class="scale-track" aria-label="Claude 3P 周剩余百分比">
               <div class="scale-fill p3" id="ov-3p-week-bar" style="width:0%"></div>
               <div class="scale-ticks" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+              <div class="floor-marker" id="ov-3p-floor-mark" hidden></div>
             </div>
             <div class="meter-foot">
               <span>5 小时窗口剩余：<strong id="ov-3p-5h-pct">--</strong></span>
+              <span class="floor-foot" id="ov-3p-floor-foot" hidden></span>
               <span id="ov-3p-reset">等待组长插件同步</span>
             </div>
           </div>
+        </div>
+
+        <div class="convention-strip" id="ov-convention-strip" hidden>
+          <div class="convention-strip-body">
+            <div class="convention-strip-head">
+              <span class="convention-strip-title">全组使用约定</span>
+              <span class="status-stamp" id="ov-convention-ver">v1</span>
+              <span class="role-tag warn" id="ov-floor-reached-tag" hidden>已触及保留底线</span>
+            </div>
+            <div class="convention-strip-text" id="ov-convention-text">--</div>
+          </div>
+          <button class="btn-soft" id="btn-jump-rules">调整约定</button>
         </div>
 
         <div class="kpi-strip">
@@ -226,6 +242,40 @@
               <div class="price-hint-line" id="price-preview-line">按当前单价：Gemini 消耗 5% 约 ¥5.00，Claude 3P 消耗 5% 约 ¥9.00</div>
             </div>
 
+            <div class="sub-box" id="usage-rules-box">
+              <div class="sub-box-title">全组使用约定（选填，成员侧边栏同步展示）</div>
+              <div class="price-hint-line" style="margin-bottom:10px;">仅作全组协作提醒，不会强行中断使用；修改后会自动递增规则版本号、留存记录，并提醒成员在侧边栏核对确认。</div>
+              <div class="quick-amounts" style="margin-bottom:10px;">
+                <button type="button" class="quick-chip" data-rule-preset="clear">不设限制</button>
+                <button type="button" class="quick-chip" data-rule-preset="floor20">总池留 20% 底线</button>
+                <button type="button" class="quick-chip" data-rule-preset="cap50">双人组 · 单人 50%</button>
+                <button type="button" class="quick-chip" data-rule-preset="cap30">三人组 · 单人 30%</button>
+                <button type="button" class="quick-chip" data-rule-preset="cap25">四人组 · 单人 25%</button>
+              </div>
+              <div class="field-pair">
+                <div class="form-field" style="margin-bottom:10px;">
+                  <label for="set-pool-floor">总池保留底线（周剩余 %，0 为不限）</label>
+                  <input id="set-pool-floor" type="number" step="1" min="0" max="95" value="0"/>
+                </div>
+                <div class="form-field" style="margin-bottom:10px;">
+                  <label for="set-member-cap">单人本周期参考上限（%，0 为不限）</label>
+                  <input id="set-member-cap" type="number" step="1" min="0" max="100" value="0"/>
+                </div>
+              </div>
+              <div class="toggle-row nested">
+                <div>
+                  <div class="toggle-title">该单人上限对组长本人同样生效</div>
+                  <div class="toggle-sub">开启后成员侧边栏会标明「全员同等适用」；关闭则会如实标明仅适用于普通成员。</div>
+                </div>
+                <input type="checkbox" id="set-apply-cap-owner" class="switch" checked/>
+              </div>
+              <div class="form-field" style="margin-bottom:8px;">
+                <label for="set-usage-note">补充约定说明（选填，最多 180 字）</label>
+                <input id="set-usage-note" type="text" maxlength="180" placeholder="例如：周池低于 20% 时优先留给有紧急任务的成员，临近重置若余量充足可放开"/>
+              </div>
+              <div class="price-hint-line" id="usage-rule-preview">当前未设置使用约定，成员侧边栏将保持精简。</div>
+            </div>
+
             <div class="toggle-row">
               <div>
                 <div class="toggle-title">仅由组长设备同步官方总剩余额度</div>
@@ -254,46 +304,48 @@
             </div>
 
             <button class="btn-ink" id="btn-save-settings">保存看板规则</button>
-
-            <div id="rule-history-box" style="margin-top:16px;" hidden>
-              <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;">规则变更记录（全体成员可见）</div>
-              <div class="rule-history-list" id="rule-history-list"></div>
-            </div>
           </div>
 
-          <div class="settings-panel">
-            <h2>数据存储位置</h2>
-            <div class="choice-rail" role="radiogroup" aria-label="存储位置">
-              <label class="choice-item">
-                <input type="radio" name="console-mode" value="local" checked/>
-                <div>
-                  <div class="choice-title">本机离线存储（SQLite）</div>
-                  <div class="choice-sub">无需注册云账号，适合先在本机体验功能。</div>
+          <div class="settings-stack">
+            <div class="settings-panel">
+              <h2>数据存储位置</h2>
+              <div class="choice-rail" role="radiogroup" aria-label="存储位置">
+                <label class="choice-item">
+                  <input type="radio" name="console-mode" value="local" checked/>
+                  <div>
+                    <div class="choice-title">本机离线存储（SQLite）</div>
+                    <div class="choice-sub">无需注册云账号，适合先在本机体验功能。</div>
+                  </div>
+                </label>
+                <label class="choice-item">
+                  <input type="radio" name="console-mode" value="cloud"/>
+                  <div>
+                    <div class="choice-title">Cloudflare 云端同步</div>
+                    <div class="choice-sub">使用免费 Workers + D1 托管，朋友可跨网络随时同步。</div>
+                  </div>
+                </label>
+              </div>
+
+              <div class="sub-box" id="cloud-cfg-box" style="margin-top:12px;" hidden>
+                <div class="form-field">
+                  <label for="cfg-worker-url">Cloudflare Worker 地址</label>
+                  <input id="cfg-worker-url" type="url" placeholder="https://agy-family-ledger.你的子域.workers.dev"/>
                 </div>
-              </label>
-              <label class="choice-item">
-                <input type="radio" name="console-mode" value="cloud"/>
-                <div>
-                  <div class="choice-title">Cloudflare 云端同步</div>
-                  <div class="choice-sub">使用免费 Workers + D1 托管，朋友可跨网络随时同步。</div>
+                <div class="form-field" style="margin-bottom:0;">
+                  <label for="cfg-admin-secret">管理员密钥（ADMIN_SECRET，留空则保持原值）</label>
+                  <input id="cfg-admin-secret" type="password" placeholder="部署 Worker 时设置的管理员密码"/>
                 </div>
-              </label>
+              </div>
+
+              <div class="btn-pair" style="margin-top:14px;">
+                <button class="btn-ink" id="btn-save-console-cfg">保存存储设置</button>
+                <button class="btn-ghost" id="btn-install-owner-settings">安装组长插件到本机</button>
+              </div>
             </div>
 
-            <div class="sub-box" id="cloud-cfg-box" style="margin-top:12px;" hidden>
-              <div class="form-field">
-                <label for="cfg-worker-url">Cloudflare Worker 地址</label>
-                <input id="cfg-worker-url" type="url" placeholder="https://agy-family-ledger.你的子域.workers.dev"/>
-              </div>
-              <div class="form-field" style="margin-bottom:0;">
-                <label for="cfg-admin-secret">管理员密钥（ADMIN_SECRET，留空则保持原值）</label>
-                <input id="cfg-admin-secret" type="password" placeholder="部署 Worker 时设置的管理员密码"/>
-              </div>
-            </div>
-
-            <div class="btn-pair" style="margin-top:14px;">
-              <button class="btn-ink" id="btn-save-console-cfg">保存存储设置</button>
-              <button class="btn-ghost" id="btn-install-owner-settings">安装组长插件到本机</button>
+            <div class="settings-panel" id="rule-history-box" hidden>
+              <h2>规则变更记录（全体成员可见）</h2>
+              <div class="rule-history-list" id="rule-history-list"></div>
             </div>
           </div>
         </div>

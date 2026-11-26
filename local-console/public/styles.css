@@ -301,6 +301,40 @@ button:active { transform: translateY(1px); }
   pointer-events: none;
 }
 .scale-ticks span { width: 1px; height: 100%; background: rgba(255, 253, 249, 0.45); }
+.floor-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--vermilion);
+  pointer-events: none;
+  z-index: 2;
+}
+.floor-foot { color: var(--muted); }
+.floor-foot.reached { color: var(--vermilion); font-weight: 700; }
+
+.convention-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  background: var(--hover-surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 11px 15px;
+  margin-bottom: 18px;
+}
+.convention-strip-body { min-width: 0; flex: 1; }
+.convention-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.convention-strip-title { font-size: 13px; font-weight: 700; color: var(--ink); }
+.convention-strip-text { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
 
 .meter-foot {
   display: flex;
@@ -600,6 +634,13 @@ button:active { transform: translateY(1px); }
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 24px;
+  align-items: start;
+}
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
 }
 .settings-panel {
   background: var(--paper-bg);
@@ -679,6 +720,17 @@ button:active { transform: translateY(1px); }
   border-radius: 10px;
   padding: 12px 13px;
   margin-bottom: 14px;
+}
+.sub-box-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 3px;
+}
+.toggle-row.nested {
+  background: var(--paper-bg);
+  margin-bottom: 10px;
+  padding: 9px 11px;
 }
 .price-hint-line { font-size: 12px; color: var(--muted); }
 

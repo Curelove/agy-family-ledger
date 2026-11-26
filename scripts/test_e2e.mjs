@@ -1,7 +1,8 @@
 /**
- * Antigravity 家庭组共享额度看板 · 全链路自动化端到端与安全回归验证 (v1.2.0)
+ * Antigravity 家庭组共享额度看板 · 全链路自动化端到端与安全回归验证 (v1.3.0)
  * 覆盖核心采集、真实 Antigravity Token 语义、防重复结算、防背锅上限、滚动黑洞检测、
- * 离线跨重置周期补算、本周期 week_bucket 过滤、绑定码规则锁定与变价确认、成员停用保账与安全校验。
+ * 离线跨重置周期补算、本周期 week_bucket 过滤、绑定码规则锁定与变价确认、
+ * 全组使用约定（保留底线 / 单人参考上限 / 组长适用范围 / 防暗改确认）、成员停用保账与安全校验。
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -9,6 +10,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { computeRuleNoteHash as engineNoteHash } from "../shared/billing-engine.mjs";
 import { LedgerStore, wrapNodeSqliteAdapter } from "../shared/ledger-store.mjs";
 import {
   extractNumericUsageFromLine,
@@ -17,7 +19,10 @@ import {
   parseInviteCode,
   buildInviteCode,
   evaluateRuleMismatch,
+  computeRuleNoteHash as collectorNoteHash,
+  MemberLedgerCollector,
 } from "../member-plugin/sidecars/ledger/collector.mjs";
+import http from "node:http";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -403,6 +408,218 @@ try {
     assert.equal(dash.members[0].name, "旧组长");
     assert.equal(dash.members[0].acceptedRuleVersion, 1);
     assert.ok(Array.isArray(dash.ruleChanges));
+  });
+
+  // 12. 全组使用约定绑定码锁定、纯 JS 短哈希一致性与防暗改检测（含 v1.2.0 向后兼容）
+  await test("usage-rules:invite-code-lock-note-hash-parity-and-tamper-detection", async () => {
+    const sampleNote = "周池低于 20% 时优先留给有急事的成员";
+    assert.equal(engineNoteHash(sampleNote), collectorNoteHash(sampleNote), "Worker 引擎与成员端文字指纹算法必须完全一致");
+
+    const code = buildInviteCode({
+      serverUrl: "https://agy-family-ledger.example.workers.dev",
+      memberToken: "agf_test_rules_token_01",
+      ruleVersion: 3,
+      ledgerMode: "board_only",
+      poolReserveFloorPct: 20,
+      memberWeeklyCapPct: 30,
+      applyCapToOwner: true,
+      usageRuleNote: sampleNote,
+    });
+    assert.ok(code.includes("&rf=20&mc=30&ao=1&nh="));
+    const parsed = parseInviteCode(code);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.agreedRules.poolReserveFloorPct, 20);
+    assert.equal(parsed.agreedRules.memberWeeklyCapPct, 30);
+    assert.equal(parsed.agreedRules.applyCapToOwner, true);
+    assert.equal(parsed.agreedRules.usageRuleNoteHash, engineNoteHash(sampleNote));
+
+    const matchingView = {
+      role: "member",
+      needsRuleConfirm: false,
+      pricing: {
+        ruleVersion: 3,
+        ledgerMode: "board_only",
+        geminiFenPerWeeklyPct: 100,
+        thirdPartyFenPerWeeklyPct: 180,
+        poolReserveFloorPct: 20,
+        memberWeeklyCapPct: 30,
+        applyCapToOwner: true,
+        usageRuleNote: sampleNote,
+        usageRuleNoteHash: engineNoteHash(sampleNote),
+      },
+    };
+    assert.equal(evaluateRuleMismatch(parsed.agreedRules, matchingView).mismatch, false);
+
+    // 即使版本号未变，只要云端暗自收紧上限或改成组长豁免或篡改补充说明，客户端也必须立刻拦截提示
+    const tamperedCap = evaluateRuleMismatch(parsed.agreedRules, {
+      ...matchingView,
+      pricing: { ...matchingView.pricing, memberWeeklyCapPct: 20 },
+    });
+    assert.equal(tamperedCap.mismatch, true);
+    assert.equal(tamperedCap.isBoardOnlyChange, true);
+
+    const tamperedOwnerScope = evaluateRuleMismatch(parsed.agreedRules, {
+      ...matchingView,
+      pricing: { ...matchingView.pricing, applyCapToOwner: false },
+    });
+    assert.equal(tamperedOwnerScope.mismatch, true);
+
+    const tamperedNote = evaluateRuleMismatch(parsed.agreedRules, {
+      ...matchingView,
+      pricing: { ...matchingView.pricing, usageRuleNote: "改为仅限白天使用", usageRuleNoteHash: engineNoteHash("改为仅限白天使用") },
+    });
+    assert.equal(tamperedNote.mismatch, true);
+
+    // 兼容 v1.2.0 绑定码（不含 rf/mc/ao/nh）连接未设约定的 v1.3.0 服务端时无误报
+    const v120Parsed = parseInviteCode("https://demo.workers.dev#agf_legacy_v120_tok&v=1&m=board&g=100&p=180");
+    assert.equal(v120Parsed.ok, true);
+    const defaultV130View = {
+      role: "member",
+      needsRuleConfirm: false,
+      pricing: {
+        ruleVersion: 1,
+        ledgerMode: "board_only",
+        geminiFenPerWeeklyPct: 100,
+        thirdPartyFenPerWeeklyPct: 180,
+        poolReserveFloorPct: 0,
+        memberWeeklyCapPct: 0,
+        applyCapToOwner: true,
+        usageRuleNote: "",
+        usageRuleNoteHash: "",
+      },
+    };
+    assert.equal(evaluateRuleMismatch(v120Parsed.agreedRules, defaultV130View).mismatch, false);
+  });
+
+  // 13. 纯看板模式下的全组使用约定版本审计、底线/上限触发状态与组长同等适用开关
+  await test("usage-rules:board-only-version-audit-floor-cap-and-owner-scope", async () => {
+    let t = Date.parse("2026-11-27T08:00:00Z");
+    const db2 = new DatabaseSync(":memory:");
+    const s2 = new LedgerStore(wrapNodeSqliteAdapter(db2), { nowFn: () => t });
+    await s2.ensureSchema(SCHEMA_SQL);
+    const d0 = await s2.getAdminDashboard();
+    const own2 = d0.members.find((m) => m.role === "owner");
+    const m1 = await s2.createMember({ name: "成员甲" });
+    const m2 = await s2.createMember({ name: "成员乙" });
+
+    assert.equal(d0.settings.ledger_mode, "board_only");
+    assert.equal(d0.settings.rule_version, 1);
+    assert.equal(d0.usageRules.hasUsageRules, false);
+
+    // 组长设定三人组常用约定：总池留 20% 底线、单人参考上限 30%、全员同等适用
+    await s2.updateSettings({
+      pool_reserve_floor_pct: 20,
+      member_weekly_cap_pct: 30,
+      apply_cap_to_owner: true,
+      usage_rule_note: "周日晚上临近重置前余量充足可放开",
+    });
+    const d1 = await s2.getAdminDashboard();
+    assert.equal(d1.settings.rule_version, 2, "修改全组使用约定必须自动递增 rule_version");
+    assert.equal(d1.ruleChanges.length, 1);
+    assert.ok(d1.ruleChanges[0].next_summary.includes("20%") && d1.ruleChanges[0].next_summary.includes("30%"));
+
+    const m1Before = await s2.getMemberSelfView(m1.id, t);
+    assert.equal(m1Before.needsRuleConfirm, true, "纯看板模式修改使用约定后，成员侧边栏也必须收到确认提示");
+    assert.equal(m1Before.usageRules.hasUsageRules, true);
+
+    await s2.confirmMemberRules(m1.member_token);
+    await s2.confirmMemberRules(m2.member_token);
+
+    // 模拟消耗：成员甲先用掉 32%（超过 30% 单人参考上限），随后全组池降到 18%（触及 20% 总池保留底线）
+    const rIso = "2026-12-03T00:00:00Z";
+    await s2.ingestHeartbeat(own2.memberToken, {
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 100, resetAt: rIso, capturedAtMs: t }],
+    });
+    t += 60_000;
+    await s2.ingestHeartbeat(m1.member_token, {
+      usageEvents: [{ id: "u1:s1", modelName: "gemini-4-carbon-high", uncachedInputTokens: 2_500_000, outputTokens: 800_000, timestampMs: t - 5000 }],
+    });
+    await s2.ingestHeartbeat(own2.memberToken, {
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 68, resetAt: rIso, capturedAtMs: t }],
+    });
+    t += 60_000;
+    await s2.ingestHeartbeat(own2.memberToken, {
+      usageEvents: [{ id: "o1:s1", modelName: "gemini-4-carbon-high", uncachedInputTokens: 4_000_000, outputTokens: 1_200_000, timestampMs: t - 5000 }],
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 18, resetAt: rIso, capturedAtMs: t }],
+    });
+
+    const m1After = await s2.getMemberSelfView(m1.id, t);
+    assert.equal(m1After.usageRules.poolFloor.geminiReached, true, "剩余 18% 必须触发 20% 总池底线提醒");
+    assert.equal(m1After.usageRules.memberCap.geminiReached, true, "成员甲已用 32% 必须触发 30% 单人参考上限提醒");
+    assert.equal(m1After.peers.find((p) => p.name === "成员甲").capReached, true);
+    assert.equal(m1After.peers.find((p) => p.role === "owner").capReached, true, "开启全员同等适用时，组长超 30% 也同样公开标示");
+
+    // 组长改为仅约束普通成员 -> 版本号再次递增，成员收到明确变更通知，且组长不再计入单人上限
+    await s2.updateSettings({ apply_cap_to_owner: false });
+    const ownView = await s2.getMemberSelfView(own2.id, t);
+    const m1ScopeChanged = await s2.getMemberSelfView(m1.id, t);
+    assert.equal(ownView.pricing.ruleVersion, 3);
+    assert.equal(ownView.usageRules.memberCap.applies, false);
+    assert.equal(m1ScopeChanged.needsRuleConfirm, true, "调整组长适用范围必须触发成员确认，杜绝暗中双标");
+  });
+
+  // 14. 新版绑定码首次连接自动对齐同版本确认状态 + 中途暗改仍严格拦截
+  await test("usage-rules:matching-v2-invite-auto-aligns-while-v3-change-prompts-confirm", async () => {
+    const db3 = new DatabaseSync(":memory:");
+    const s3 = new LedgerStore(wrapNodeSqliteAdapter(db3));
+    await s3.ensureSchema(SCHEMA_SQL);
+    const m = await s3.createMember({ name: "新成员丙" }); // 创建时为 v1
+    await s3.updateSettings({
+      pool_reserve_floor_pct: 20,
+      member_weekly_cap_pct: 30,
+      apply_cap_to_owner: true,
+      usage_rule_note: "晚高峰错峰",
+    }); // 升级为 v2
+
+    const srv = http.createServer(async (req, res) => {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      const tok = req.headers["x-member-token"] || "";
+      let out;
+      if (req.url === "/api/member/heartbeat") out = await s3.ingestHeartbeat(tok, body);
+      else if (req.url === "/api/member/confirm-rules") out = await s3.confirmMemberRules(tok, body.ruleVersion);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(out));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const port = srv.address().port;
+
+    try {
+      const colDir = fs.mkdtempSync(path.join(tmpDir, "col-"));
+      const col = new MemberLedgerCollector({
+        configPath: path.join(colDir, "config.json"),
+        defaultConfigPath: path.join(colDir, "config.default.json"),
+        statePath: path.join(colDir, "state.json"),
+        transcriptRoots: [],
+      });
+      const v2Code = buildInviteCode({
+        serverUrl: `http://127.0.0.1:${port}`,
+        memberToken: m.member_token,
+        ruleVersion: 2,
+        ledgerMode: "board_only",
+        poolReserveFloorPct: 20,
+        memberWeeklyCapPct: 30,
+        applyCapToOwner: true,
+        usageRuleNote: "晚高峰错峰",
+      });
+      col.saveConfig({ inviteCode: v2Code });
+      const r1 = await col.syncOnce();
+      assert.equal(r1.ok, true);
+      assert.equal(r1.state.ruleMismatch.mismatch, false, "与绑定码 100% 一致的 v2 首次入组不得弹出相同新旧对比的误报卡片");
+      assert.equal(r1.state.memberView.needsRuleConfirm, false);
+
+      // 组长后续收紧上限到 25%（v3）-> 立刻触发确认卡片，绝不自动确认
+      await s3.updateSettings({ member_weekly_cap_pct: 25 });
+      const r2 = await col.syncOnce();
+      assert.equal(r2.ok, true);
+      assert.equal(r2.state.ruleMismatch.mismatch, true, "后续任何规则变动必须触发成员确认卡片");
+      assert.equal(r2.state.ruleMismatch.isBoardOnlyChange, true);
+      assert.ok(r2.state.ruleMismatch.agreedSummary.includes("30%"));
+      assert.ok(r2.state.ruleMismatch.currentSummary.includes("25%"));
+    } finally {
+      srv.close();
+    }
   });
 
   console.log(`\nALL E2E TESTS PASSED (${passed}/${passed})`);

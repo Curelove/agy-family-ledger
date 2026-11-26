@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 统一数据存储层 (v1.2.0)
+ * Antigravity 家庭组共享额度看板 · 统一数据存储层 (v1.3.0)
  *
  * 兼容两类 SQLite 后端（纯标准 JS，零 Node 专有依赖，可直接部署 Cloudflare Workers）：
  * 1. Cloudflare D1（通过 wrapD1Adapter(env.DB)）
@@ -15,6 +15,10 @@ import {
   allocateSliceUsage,
   evaluateBlackholeAlert,
   formatPricingRuleSummary,
+  evaluateUsageRulesStatus,
+  normalizePctLimit,
+  sanitizeUsageRuleNote,
+  computeRuleNoteHash,
 } from "./billing-engine.mjs";
 
 const BLACKHOLE_BUFFER_KEY = "_internal_blackhole_buffer";
@@ -26,6 +30,10 @@ const RULE_PRICING_KEYS = [
   "third_party_fen_per_weekly_pct",
   "gemini_fen_per_million_units",
   "third_party_fen_per_million_units",
+  "pool_reserve_floor_pct",
+  "member_weekly_cap_pct",
+  "apply_cap_to_owner",
+  "usage_rule_note",
 ];
 
 function randomHex(bytes = 12) {
@@ -182,6 +190,10 @@ export class LedgerStore {
       out.ledger_mode = out.calibration_dry_run === false ? "prepaid" : "board_only";
     }
     out.rule_version = Math.max(1, Number(out.rule_version) || 1);
+    out.pool_reserve_floor_pct = normalizePctLimit(out.pool_reserve_floor_pct, 95);
+    out.member_weekly_cap_pct = normalizePctLimit(out.member_weekly_cap_pct, 100);
+    out.apply_cap_to_owner = out.apply_cap_to_owner !== false;
+    out.usage_rule_note = sanitizeUsageRuleNote(out.usage_rule_note);
     return out;
   }
 
@@ -190,12 +202,24 @@ export class LedgerStore {
     const before = await this.getSettings();
     const normalized = { ...(patch || {}) };
     const changeNote = String(patch?.change_note || patch?.note || "").trim().slice(0, 160);
-    delete normalized.rule_version; // 版本号仅由系统在收费规则变化时自动递增
+    delete normalized.rule_version; // 版本号仅由系统在规则或约定变化时自动递增
 
     if (normalized.ledger_mode === "board_only" || normalized.ledger_mode === "prepaid") {
       normalized.calibration_dry_run = normalized.ledger_mode !== "prepaid";
     } else if (normalized.calibration_dry_run !== undefined) {
       normalized.ledger_mode = normalized.calibration_dry_run ? "board_only" : "prepaid";
+    }
+    if ("pool_reserve_floor_pct" in normalized) {
+      normalized.pool_reserve_floor_pct = normalizePctLimit(normalized.pool_reserve_floor_pct, 95);
+    }
+    if ("member_weekly_cap_pct" in normalized) {
+      normalized.member_weekly_cap_pct = normalizePctLimit(normalized.member_weekly_cap_pct, 100);
+    }
+    if ("apply_cap_to_owner" in normalized) {
+      normalized.apply_cap_to_owner = Boolean(normalized.apply_cap_to_owner);
+    }
+    if ("usage_rule_note" in normalized) {
+      normalized.usage_rule_note = sanitizeUsageRuleNote(normalized.usage_rule_note);
     }
 
     const nowMs = this.nowFn();
@@ -241,18 +265,22 @@ export class LedgerStore {
           nowIso,
         ]
       );
-      // 组长自身自动视为已确认新规则，普通成员须在各自侧边栏手动确认后新计费规则才对其扣费生效
+      // 组长自身自动视为已确认新规则，普通成员须在各自侧边栏手动确认
       await this.db.run(
         "UPDATE members SET accepted_rule_version = ?, updated_at = ? WHERE role = 'owner'",
         [nextRuleVersion, nowIso]
       );
+      const confirmHint =
+        after.ledger_mode === "prepaid"
+          ? "普通成员在侧边栏确认新规则前，系统不会按新单价静默扣费。"
+          : "全体成员侧边栏已弹出变更对比，需各自查看确认。";
       await this.db.run(
         `INSERT INTO alerts (id, kind, severity, pool_key, member_id, missing_pct, title, detail, acknowledged, qq_notified, created_at)
          VALUES (?, 'rule_change', 'info', '', '', 0, ?, ?, 0, 1, ?)`,
         [
           `alt_${randomHex(8)}`,
           `规则版本已更新为 v${nextRuleVersion}`,
-          `由「${prevSummary}」变更为「${nextSummary}」${changeNote ? `（说明：${changeNote}）` : ""}。普通成员在侧边栏确认新规则前，系统不会按新单价静默扣费。`,
+          `由「${prevSummary}」变更为「${nextSummary}」${changeNote ? `（说明：${changeNote}）` : ""}。${confirmHint}`,
           nowIso,
         ]
       );
@@ -1008,6 +1036,12 @@ export class LedgerStore {
     const currentRuleVersion = Math.max(1, Number(settings.rule_version) || 1);
     const acceptedRuleVersion = Math.max(1, Number(member.accepted_rule_version) || 1);
     const needsRuleConfirm = member.role !== "owner" && acceptedRuleVersion < currentRuleVersion;
+    const usageRules = evaluateUsageRulesStatus({
+      settings,
+      pools,
+      weekSummary,
+      role: member.role,
+    });
 
     const showPeerShares = settings.show_peer_shares_to_members !== false;
     let peers = [];
@@ -1030,10 +1064,13 @@ export class LedgerStore {
         else cur.geminiPct = Math.round(Number(r.total_pct || 0) * 100) / 100;
         pMap.set(r.member_id, cur);
       }
+      const capPct = usageRules.memberWeeklyCapPct;
+      const applyCapOwner = usageRules.applyCapToOwner;
       peers = peerMembers.map((pm) => {
         const seenMs = pm.last_seen_at ? Date.parse(pm.last_seen_at) : 0;
         const w = pMap.get(pm.id) || { geminiPct: 0, thirdPartyPct: 0 };
         const h5 = recent5h.shareMap.get(pm.id) || { geminiSharePct: 0, thirdPartySharePct: 0, requests5h: 0 };
+        const peerCapApplies = capPct > 0 && (pm.role !== "owner" || applyCapOwner);
         return {
           name: pm.name,
           role: pm.role,
@@ -1043,6 +1080,7 @@ export class LedgerStore {
           thirdPartyPct: w.thirdPartyPct,
           recent5hGeminiShare: h5.geminiSharePct,
           recent5hThirdPartyShare: h5.thirdPartySharePct,
+          capReached: peerCapApplies && (w.geminiPct >= capPct || w.thirdPartyPct >= capPct),
         };
       });
     }
@@ -1067,6 +1105,7 @@ export class LedgerStore {
       recentRuleChanges,
       peers,
       pools,
+      usageRules,
       pricing: {
         familyName: settings.family_name,
         ruleVersion: currentRuleVersion,
@@ -1075,6 +1114,11 @@ export class LedgerStore {
         pricingMode: settings.pricing_mode,
         geminiFenPerWeeklyPct: settings.gemini_fen_per_weekly_pct,
         thirdPartyFenPerWeeklyPct: settings.third_party_fen_per_weekly_pct,
+        poolReserveFloorPct: usageRules.poolReserveFloorPct,
+        memberWeeklyCapPct: usageRules.memberWeeklyCapPct,
+        applyCapToOwner: usageRules.applyCapToOwner,
+        usageRuleNote: usageRules.usageRuleNote,
+        usageRuleNoteHash: usageRules.usageRuleNoteHash,
         summaryText: formatPricingRuleSummary(settings),
         calibrationDryRun: !isPrepaid,
       },
@@ -1133,6 +1177,15 @@ export class LedgerStore {
       reqMap.set(r.member_id, cur);
     }
 
+    const usageRules = evaluateUsageRulesStatus({
+      settings,
+      pools,
+      weekSummary: { geminiPct: 0, thirdPartyPct: 0 },
+      role: "owner",
+    });
+    const capPct = usageRules.memberWeeklyCapPct;
+    const applyCapOwner = usageRules.applyCapToOwner;
+
     const members = rawMembers.map((m) => {
       const lastSeenMs = m.last_seen_at ? Date.parse(m.last_seen_at) : 0;
       const online = m.status === "active" && Boolean(lastSeenMs && nowMs - lastSeenMs <= offlineGraceMs);
@@ -1140,6 +1193,10 @@ export class LedgerStore {
       const r7 = reqMap.get(m.id) || { requests7d: 0, tokens7d: 0 };
       const h5 = recent5h.shareMap.get(m.id) || { geminiSharePct: 0, thirdPartySharePct: 0, requests5h: 0 };
       const acceptedVer = Math.max(1, Number(m.accepted_rule_version) || 1);
+      const capApplies = m.status === "active" && capPct > 0 && (m.role !== "owner" || applyCapOwner);
+      const capReached = capApplies && (week.geminiPct >= capPct || week.thirdPartyPct >= capPct);
+      const capApproaching =
+        capApplies && !capReached && (week.geminiPct >= capPct * 0.85 || week.thirdPartyPct >= capPct * 0.85);
       return {
         id: m.id,
         name: m.name,
@@ -1151,6 +1208,8 @@ export class LedgerStore {
         status: m.status,
         acceptedRuleVersion: acceptedVer,
         needsRuleConfirm: m.status === "active" && m.role !== "owner" && acceptedVer < currentRuleVersion,
+        capReached,
+        capApproaching,
         note: m.note || "",
         online,
         lastSeenAt: m.last_seen_at || null,
@@ -1207,6 +1266,7 @@ export class LedgerStore {
       ok: true,
       serverTimeIso: new Date(nowMs).toISOString(),
       settings,
+      usageRules,
       pools,
       weekBuckets,
       summary: {

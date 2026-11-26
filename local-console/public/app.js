@@ -109,6 +109,7 @@ function renderMemberList(members) {
       if (isOwner) tags.push('<span class="role-tag">组长</span>');
       if (isPaused) tags.push('<span class="role-tag warn">已暂停</span>');
       if (!isArchived && m.needsRuleConfirm) tags.push('<span class="role-tag warn">待确认新规则</span>');
+      if (!isArchived && m.capReached) tags.push('<span class="role-tag warn">已达上限参考</span>');
 
       const h5Desc =
         h5G > 0 || h5P > 0
@@ -290,6 +291,21 @@ function updatePricePreview() {
     `按当前单价：Gemini 消耗 5% 约 ¥${(gemYuan * 5).toFixed(2)}，Claude 3P 消耗 5% 约 ¥${(p3Yuan * 5).toFixed(2)}`;
 }
 
+function updateUsageRulePreview() {
+  const floor = Math.max(0, Math.min(95, Number($("set-pool-floor").value) || 0));
+  const cap = Math.max(0, Math.min(100, Number($("set-member-cap").value) || 0));
+  const applyOwner = $("set-apply-cap-owner").checked;
+  const note = $("set-usage-note").value.trim();
+  const fmtL = (v) => (Number.isInteger(v) ? v + "%" : v.toFixed(1) + "%");
+  const parts = [];
+  if (floor > 0) parts.push(`总池剩余 ${fmtL(floor)} 时暂停非紧急任务`);
+  if (cap > 0) parts.push(`单人每周期上限 ${fmtL(cap)}（${applyOwner ? "全员同等适用" : "适用于普通成员"}）`);
+  if (note) parts.push(`补充说明：${note.length > 36 ? note.slice(0, 36) + "…" : note}`);
+  $("usage-rule-preview").textContent = parts.length
+    ? `成员侧边栏公示预览：${parts.join("；")}`
+    : "当前未设置使用约定，成员侧边栏将保持精简，不显示约定卡片。";
+}
+
 function applyDashboard(dash) {
   currentDash = dash;
   const s = dash.settings || {};
@@ -313,6 +329,29 @@ function applyDashboard(dash) {
   $("ov-3p-week-bar").style.width = (pw ? Math.max(0, Math.min(100, pw.remainingPct)) : 0) + "%";
   $("ov-3p-5h-pct").textContent = pct(p5?.remainingPct);
   $("ov-3p-reset").textContent = fmtReset(pw?.resetAt);
+
+  const ur = dash.usageRules || {};
+  const floorPct = Number(ur.poolReserveFloorPct || 0);
+  const fmtL = (v) => (Number.isInteger(v) ? v + "%" : v.toFixed(1) + "%");
+  $("ov-gem-floor-mark").hidden = !(floorPct > 0);
+  $("ov-3p-floor-mark").hidden = !(floorPct > 0);
+  $("ov-gem-floor-foot").hidden = !(floorPct > 0);
+  $("ov-3p-floor-foot").hidden = !(floorPct > 0);
+  if (floorPct > 0) {
+    $("ov-gem-floor-mark").style.left = floorPct + "%";
+    $("ov-3p-floor-mark").style.left = floorPct + "%";
+    $("ov-gem-floor-foot").textContent = ur.poolFloor?.geminiReached ? `已达保留底线 ${fmtL(floorPct)}` : `保留底线 ${fmtL(floorPct)}`;
+    $("ov-gem-floor-foot").className = "floor-foot" + (ur.poolFloor?.geminiReached ? " reached" : "");
+    $("ov-3p-floor-foot").textContent = ur.poolFloor?.thirdPartyReached ? `已达保留底线 ${fmtL(floorPct)}` : `保留底线 ${fmtL(floorPct)}`;
+    $("ov-3p-floor-foot").className = "floor-foot" + (ur.poolFloor?.thirdPartyReached ? " reached" : "");
+  }
+
+  $("ov-convention-strip").hidden = !Boolean(ur.hasUsageRules);
+  if (ur.hasUsageRules) {
+    $("ov-convention-ver").textContent = `v${Number(s.rule_version || 1)}`;
+    $("ov-floor-reached-tag").hidden = !Boolean(ur.poolFloor?.anyReached);
+    $("ov-convention-text").textContent = ur.summaryText || "";
+  }
 
   const sum = dash.summary || {};
   $("kpi-online").textContent = `${sum.onlineCount || 0} / ${sum.memberCount || 0}`;
@@ -356,9 +395,14 @@ function applyDashboard(dash) {
   $("set-show-peers").checked = s.show_peer_shares_to_members !== false;
   $("set-gem-price").value = ((Number(s.gemini_fen_per_weekly_pct) || 100) / 100).toFixed(2);
   $("set-3p-price").value = ((Number(s.third_party_fen_per_weekly_pct) || 180) / 100).toFixed(2);
+  $("set-pool-floor").value = Number(s.pool_reserve_floor_pct || 0);
+  $("set-member-cap").value = Number(s.member_weekly_cap_pct || 0);
+  $("set-apply-cap-owner").checked = s.apply_cap_to_owner !== false;
+  $("set-usage-note").value = s.usage_rule_note || "";
   $("set-warn-pct").value = Number(s.blackhole_warn_missing_pct) || 5;
   $("set-crit-pct").value = Number(s.blackhole_critical_missing_pct) || 15;
   updatePricePreview();
+  updateUsageRulePreview();
   syncSettingsFormVisibility();
 }
 
@@ -524,10 +568,36 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-document.querySelectorAll(".quick-chip").forEach((chip) => {
+document.querySelectorAll(".quick-chip[data-yuan]").forEach((chip) => {
   chip.addEventListener("click", () => {
     $("topup-yuan").value = chip.dataset.yuan;
   });
+});
+
+document.querySelectorAll("[data-rule-preset]").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const preset = chip.dataset.rulePreset;
+    if (preset === "clear") {
+      $("set-pool-floor").value = "0";
+      $("set-member-cap").value = "0";
+      $("set-usage-note").value = "";
+    } else if (preset === "floor20") {
+      $("set-pool-floor").value = "20";
+    } else if (preset === "cap50") {
+      $("set-member-cap").value = "50";
+    } else if (preset === "cap30") {
+      $("set-member-cap").value = "30";
+    } else if (preset === "cap25") {
+      $("set-member-cap").value = "25";
+    }
+    updateUsageRulePreview();
+  });
+});
+
+$("btn-jump-rules").addEventListener("click", () => {
+  const settingsBtn = document.querySelector('.index-tab[data-tab="settings"]');
+  if (settingsBtn) settingsBtn.click();
+  $("usage-rules-box")?.scrollIntoView({ behavior: "smooth", block: "center" });
 });
 
 $("btn-open-add-member").addEventListener("click", () => {
@@ -604,6 +674,10 @@ $("btn-confirm-topup").addEventListener("click", async () => {
 
 $("set-gem-price").addEventListener("input", updatePricePreview);
 $("set-3p-price").addEventListener("input", updatePricePreview);
+$("set-pool-floor").addEventListener("input", updateUsageRulePreview);
+$("set-member-cap").addEventListener("input", updateUsageRulePreview);
+$("set-apply-cap-owner").addEventListener("change", updateUsageRulePreview);
+$("set-usage-note").addEventListener("input", updateUsageRulePreview);
 
 $("btn-save-settings").addEventListener("click", async () => {
   const ledgerMode = document.querySelector('input[name="ledger-mode"]:checked')?.value || "board_only";
@@ -617,6 +691,10 @@ $("btn-save-settings").addEventListener("click", async () => {
         show_peer_shares_to_members: $("set-show-peers").checked,
         gemini_fen_per_weekly_pct: Math.round((Number($("set-gem-price").value) || 1) * 100),
         third_party_fen_per_weekly_pct: Math.round((Number($("set-3p-price").value) || 1.8) * 100),
+        pool_reserve_floor_pct: Math.max(0, Math.min(95, Number($("set-pool-floor").value) || 0)),
+        member_weekly_cap_pct: Math.max(0, Math.min(100, Number($("set-member-cap").value) || 0)),
+        apply_cap_to_owner: $("set-apply-cap-owner").checked,
+        usage_rule_note: $("set-usage-note").value.trim().slice(0, 180),
         blackhole_warn_missing_pct: Number($("set-warn-pct").value) || 5,
         blackhole_critical_missing_pct: Number($("set-crit-pct").value) || 15,
       }),

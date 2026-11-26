@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.2.0)
+ * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.3.0)
  *
  * 特性：
  * - 支持 Cloudflare Workers 云端同步与本机 SQLite 离线存储切换。
@@ -111,7 +111,7 @@ async function proxyToCloud(cfg, apiPath, method = "GET", body = null) {
   const resp = await fetch(url, {
     method,
     headers: {
-      "User-Agent": "AgyFamilyLedger/1.2",
+      "User-Agent": "AgyFamilyLedger/1.3",
       "Content-Type": "application/json",
       "X-Admin-Secret": cfg.adminSecret,
     },
@@ -190,6 +190,10 @@ async function buildMemberInviteInfo(memberId, serverPort) {
   const ledgerMode = s.ledger_mode === "prepaid" ? "prepaid" : "board_only";
   const gemFen = Number(s.gemini_fen_per_weekly_pct) || 100;
   const p3Fen = Number(s.third_party_fen_per_weekly_pct) || 180;
+  const poolReserveFloorPct = Number(s.pool_reserve_floor_pct) || 0;
+  const memberWeeklyCapPct = Number(s.member_weekly_cap_pct) || 0;
+  const applyCapToOwner = s.apply_cap_to_owner !== false;
+  const usageRuleNote = String(s.usage_rule_note || "").trim();
 
   const inviteCode = buildInviteCode({
     serverUrl: targetUrl,
@@ -198,6 +202,10 @@ async function buildMemberInviteInfo(memberId, serverPort) {
     ledgerMode,
     geminiFenPerWeeklyPct: gemFen,
     thirdPartyFenPerWeeklyPct: p3Fen,
+    poolReserveFloorPct,
+    memberWeeklyCapPct,
+    applyCapToOwner,
+    usageRuleNote,
   });
   const isLocalOnly = /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(targetUrl);
 
@@ -443,7 +451,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         ok: true,
         app: "agy-family-ledger-console",
-        version: "1.2.0",
+        version: "1.3.0",
         mode: cfg.mode,
         port: PORT,
       });
@@ -560,7 +568,7 @@ server.listen(PORT, "127.0.0.1", () => {
     JSON.stringify({
       ok: true,
       app: "agy-family-ledger-console",
-      version: "1.2.0",
+      version: "1.3.0",
       url: `http://127.0.0.1:${PORT}`,
       mode: loadConsoleConfig().mode,
     })
