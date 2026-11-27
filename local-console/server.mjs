@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.3.0)
+ * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.4.0)
  *
  * 特性：
  * - 支持 Cloudflare Workers 云端同步与本机 SQLite 离线存储切换。
@@ -17,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { LedgerStore, wrapNodeSqliteAdapter } from "../shared/ledger-store.mjs";
 import { formatPricingRuleSummary } from "../shared/billing-engine.mjs";
 import { buildInviteCode } from "../member-plugin/sidecars/ledger/collector.mjs";
+import { UpdateService } from "../member-plugin/sidecars/ledger/update-service.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +40,8 @@ function loadConsoleConfig() {
     mode: "local", // 'local' | 'cloud'
     cloudWorkerUrl: "",
     adminSecret: "",
+    autoCheckUpdates: true,
+    ignoredUpdateVersion: "",
   };
   try {
     if (!fs.existsSync(CONFIG_FILE)) return def;
@@ -48,6 +51,8 @@ function loadConsoleConfig() {
       mode: parsed.mode === "cloud" ? "cloud" : "local",
       cloudWorkerUrl: String(parsed.cloudWorkerUrl || "").trim().replace(/\/+$/, ""),
       adminSecret: String(parsed.adminSecret || "").trim(),
+      autoCheckUpdates: parsed.autoCheckUpdates !== false,
+      ignoredUpdateVersion: String(parsed.ignoredUpdateVersion || "").trim().replace(/^v/i, ""),
     };
   } catch {
     return def;
@@ -66,10 +71,22 @@ function saveConsoleConfig(patch = {}) {
       patch.adminSecret !== undefined && patch.adminSecret !== ""
         ? String(patch.adminSecret).trim()
         : cur.adminSecret,
+    autoCheckUpdates:
+      patch.autoCheckUpdates !== undefined ? Boolean(patch.autoCheckUpdates) : cur.autoCheckUpdates !== false,
+    ignoredUpdateVersion:
+      patch.ignoredUpdateVersion !== undefined
+        ? String(patch.ignoredUpdateVersion || "").trim().replace(/^v/i, "")
+        : cur.ignoredUpdateVersion,
   };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), "utf8");
   return next;
 }
+
+const consoleUpdateService = new UpdateService({
+  cachePath: path.join(DATA_DIR, "update_cache.json"),
+  pluginRoot: MEMBER_PLUGIN_SRC,
+  getIgnoredVersion: () => loadConsoleConfig().ignoredUpdateVersion || "",
+});
 
 function inspectOwnerLocalPluginTarget(cfg, serverPort) {
   const expectedUrl =
@@ -243,10 +260,14 @@ async function installOwnerPluginLocally(serverPort) {
   copyDirSync(MEMBER_PLUGIN_SRC, dst);
   const cfgFile = path.join(dst, "sidecars", "ledger", "config.json");
   let existingProxy = "";
+  let existingAutoCheck = true;
+  let existingIgnoredVer = "";
   try {
     if (fs.existsSync(cfgFile)) {
       const prev = JSON.parse(fs.readFileSync(cfgFile, "utf8").replace(/^\uFEFF/, ""));
       existingProxy = String(prev?.proxyUrl || "").trim();
+      if (prev?.autoCheckUpdates === false) existingAutoCheck = false;
+      existingIgnoredVer = String(prev?.ignoredUpdateVersion || "").trim();
     }
   } catch {}
 
@@ -259,6 +280,8 @@ async function installOwnerPluginLocally(serverPort) {
         memberName: owner.name,
         proxyUrl: existingProxy,
         syncIntervalSec: 90,
+        autoCheckUpdates: existingAutoCheck,
+        ignoredUpdateVersion: existingIgnoredVer,
       },
       null,
       2
@@ -451,9 +474,47 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         ok: true,
         app: "agy-family-ledger-console",
-        version: "1.3.1",
+        version: "1.4.0",
         mode: cfg.mode,
         port: PORT,
+      });
+    }
+
+    if (pathname === "/api/update/status" && method === "GET") {
+      const cfg = loadConsoleConfig();
+      return sendJson(res, {
+        ok: true,
+        meta: consoleUpdateService.getPluginMeta(),
+        update: consoleUpdateService.getCachedResult(),
+        autoCheckUpdates: cfg.autoCheckUpdates !== false,
+        ignoredUpdateVersion: cfg.ignoredUpdateVersion || "",
+      });
+    }
+    if (pathname === "/api/update/check" && method === "GET") {
+      const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
+      return sendJson(res, await consoleUpdateService.checkForUpdates({ force }));
+    }
+    if (pathname === "/api/update/check" && method === "POST") {
+      return sendJson(res, await consoleUpdateService.checkForUpdates({ force: Boolean(body?.force) }));
+    }
+    if (pathname === "/api/update/ignore" && method === "POST") {
+      const version = String(body?.version || "").trim().replace(/^v/i, "");
+      const next = saveConsoleConfig({ ignoredUpdateVersion: version });
+      return sendJson(res, {
+        ok: true,
+        autoCheckUpdates: next.autoCheckUpdates !== false,
+        ignoredUpdateVersion: next.ignoredUpdateVersion || "",
+        update: consoleUpdateService.getCachedResult(),
+      });
+    }
+    if (pathname === "/api/update/settings" && method === "POST") {
+      const next = saveConsoleConfig({
+        ...(typeof body?.autoCheckUpdates === "boolean" ? { autoCheckUpdates: body.autoCheckUpdates } : {}),
+      });
+      return sendJson(res, {
+        ok: true,
+        autoCheckUpdates: next.autoCheckUpdates !== false,
+        ignoredUpdateVersion: next.ignoredUpdateVersion || "",
       });
     }
 
@@ -568,7 +629,7 @@ server.listen(PORT, "127.0.0.1", () => {
     JSON.stringify({
       ok: true,
       app: "agy-family-ledger-console",
-      version: "1.3.1",
+      version: "1.4.0",
       url: `http://127.0.0.1:${PORT}`,
       mode: loadConsoleConfig().mode,
     })

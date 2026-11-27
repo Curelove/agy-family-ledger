@@ -178,7 +178,7 @@ export class LedgerStore {
     if (!cntRow || Number(cntRow.cnt) === 0) {
       await this.createMember({
         id: "owner_self",
-        name: "组长（我自己）",
+        name: "组长",
         role: "owner",
         initialBalanceFen: 0,
         lowBalanceFen: 0,
@@ -1100,10 +1100,15 @@ export class LedgerStore {
         const w = pMap.get(pm.id) || { geminiPct: 0, thirdPartyPct: 0 };
         const h5 = recent5h.shareMap.get(pm.id) || { geminiSharePct: 0, thirdPartySharePct: 0, requests5h: 0 };
         const peerCapApplies = capPct > 0 && (pm.role !== "owner" || applyCapOwner);
+        const isSelf = pm.id === memberId;
+        const rawPeerName = String(pm.name || "").trim();
+        const displayName = !isSelf
+          ? rawPeerName.replace(/[（(]我自己[）)]$/, "").trim() || (pm.role === "owner" ? "组长" : rawPeerName)
+          : rawPeerName;
         return {
-          name: pm.name,
+          name: displayName,
           role: pm.role,
-          isSelf: pm.id === memberId,
+          isSelf,
           online: Boolean(seenMs && nowMs - seenMs <= offlineGraceMs),
           geminiPct: w.geminiPct,
           thirdPartyPct: w.thirdPartyPct,

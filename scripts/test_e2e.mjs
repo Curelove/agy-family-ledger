@@ -22,6 +22,12 @@ import {
   computeRuleNoteHash as collectorNoteHash,
   MemberLedgerCollector,
 } from "../member-plugin/sidecars/ledger/collector.mjs";
+import {
+  compareSemver,
+  parseReleasesAtom,
+  computeUpdateNotificationState,
+  UpdateService,
+} from "../member-plugin/sidecars/ledger/update-service.mjs";
 import http from "node:http";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -369,11 +375,19 @@ try {
     });
     assert.equal(spoof.ignoredQuotaSnapshots, 1);
 
-    // 2) 成员侧边栏可看到自己的分摊扣费明细 + 全组近 5h 活跃占比，且不泄露他人余额/凭证
+    // 2) 成员侧边栏可看到自己的分摊扣费明细 + 全组近 5h 活跃占比，且不泄露他人余额/凭证，也不显示「（我自己）」误导文案
     const viewA = await store.getMemberSelfView(alice.id, mockNow);
     assert.ok(Array.isArray(viewA.recentAllocations) && viewA.recentAllocations.length > 0, "成员端必须可查阅个人分摊扣费明细");
     const peersJson = JSON.stringify(viewA.peers);
     assert.ok(!peersJson.includes("agf_") && !peersJson.includes("balance"), "peers 列表严禁泄露凭证或余额");
+    const ownerPeerForAlice = viewA.peers.find((p) => p.role === "owner");
+    assert.ok(ownerPeerForAlice && ownerPeerForAlice.name === "组长", "默认组长称呼应为「组长」，不得对组员显示「（我自己）」");
+
+    // 兼容老库仍存有「组长（我自己）」时，成员视角自动剥离「（我自己）」后缀
+    await store.updateMember(owner.id, { name: "组长（我自己）" });
+    const viewALegacyOwner = await store.getMemberSelfView(alice.id, mockNow);
+    assert.equal(viewALegacyOwner.peers.find((p) => p.role === "owner").name, "组长", "老库组长名含「（我自己）」时，对其他成员必须自动剥离");
+    await store.updateMember(owner.id, { name: "组长" });
 
     // 3) 暂停成员后心跳立即被拒
     await store.updateMember(alice.id, { status: "paused" });
@@ -684,6 +698,138 @@ try {
     } finally {
       srv.close();
     }
+  });
+
+  // 16. 内置 GitHub Releases 更新检查：Semver、API + Atom 限流降级、6h 缓存、版本忽略自动恢复与零注册表隐私约束
+  await test("updater:github-api-atom-fallback-cache-ignore-and-privacy", async () => {
+    assert.equal(compareSemver("1.4.0", "1.3.1"), 1);
+    assert.equal(compareSemver("v1.4.0", "1.4.0"), 0);
+    assert.equal(compareSemver("1.4.0", "1.4.0-rc.1"), 1);
+    assert.equal(compareSemver("1.3.9", "1.4.0"), -1);
+
+    const updSrc = fs.readFileSync(
+      path.join(PROJECT_ROOT, "member-plugin", "sidecars", "ledger", "update-service.mjs"),
+      "utf8"
+    );
+    assert.ok(!/child_process|reg\.exe|execFile/i.test(updSrc), "更新服务严禁调用注册表或系统进程命令");
+
+    const updDir = fs.mkdtempSync(path.join(tmpDir, "upd-"));
+    const fakePluginRoot = path.join(updDir, "plugin");
+    fs.mkdirSync(fakePluginRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(fakePluginRoot, "plugin.json"),
+      JSON.stringify({
+        name: "agy-family-ledger",
+        version: "1.4.0",
+        repository: { url: "https://github.com/Curelove/agy-family-ledger" },
+      }),
+      "utf8"
+    );
+    const cachePath = path.join(updDir, "update_cache.json");
+
+    let ignoredVer = "";
+    let apiHits = 0;
+    let mockMode = "api_v150";
+
+    const svc = new UpdateService({
+      cachePath,
+      pluginRoot: fakePluginRoot,
+      getIgnoredVersion: () => ignoredVer,
+      fetchJsonImpl: async (url) => {
+        apiHits++;
+        if (mockMode === "api_403") {
+          const e = new Error("HTTP 403");
+          e.statusCode = 403;
+          throw e;
+        }
+        const tag = mockMode === "api_v160" ? "v1.6.0" : "v1.5.0";
+        return {
+          tag_name: tag,
+          name: `家庭组额度看板 ${tag}`,
+          html_url: `https://github.com/Curelove/agy-family-ledger/releases/tag/${tag}`,
+          published_at: "2026-12-01T10:00:00Z",
+          body: `### 更新内容\n- 新增 ${tag} 优化`,
+          assets: [
+            {
+              name: `agy-family-ledger-plugin-${tag}.zip`,
+              size: 42000,
+              browser_download_url: `https://github.com/Curelove/agy-family-ledger/releases/download/${tag}/agy-family-ledger-plugin-${tag}.zip`,
+            },
+          ],
+        };
+      },
+      fetchTextImpl: async () => `<?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <id>tag:github.com,2008:Repository/1/v1.5.2-beta.1</id>
+            <link rel="alternate" href="/Curelove/agy-family-ledger/releases/tag/v1.5.2-beta.1"/>
+            <title>v1.5.2-beta.1</title>
+            <updated>2026-12-05T00:00:00Z</updated>
+            <content type="html">&lt;p&gt;测试版&lt;/p&gt;</content>
+          </entry>
+          <entry>
+            <id>tag:github.com,2008:Repository/1/v1.5.1</id>
+            <link rel="alternate" href="/Curelove/agy-family-ledger/releases/tag/v1.5.1"/>
+            <title>家庭组额度看板 v1.5.1</title>
+            <updated>2026-12-04T00:00:00Z</updated>
+            <content type="html">&lt;p&gt;修复 &amp;amp; 稳定性提升&lt;/p&gt;</content>
+          </entry>
+        </feed>`,
+    });
+
+    // 1) GitHub API 正常命中，解析 ZIP 资源并写入缓存
+    const r1 = await svc.checkForUpdates({ force: false });
+    assert.equal(r1.ok, true);
+    assert.equal(r1.latestVersion, "1.5.0");
+    assert.equal(r1.updateAvailable, true);
+    assert.equal(r1.shouldNotify, true);
+    assert.ok(r1.zipDownloadUrl.endsWith("agy-family-ledger-plugin-v1.5.0.zip"));
+    assert.equal(apiHits, 1);
+
+    // 2) 6 小时内再次静默检查直接命中缓存，不重复请求 GitHub
+    const r2 = await svc.checkForUpdates({ force: false });
+    assert.equal(r2.fromCache, true);
+    assert.equal(apiHits, 1);
+
+    // 3) 忽略 v1.5.0 后停止提醒，但发布更高版本 v1.6.0 时自动恢复提醒
+    ignoredVer = "1.5.0";
+    const rIgnored = svc.getCachedResult();
+    assert.equal(rIgnored.isIgnored, true);
+    assert.equal(rIgnored.shouldNotify, false);
+
+    mockMode = "api_v160";
+    const rHigher = await svc.checkForUpdates({ force: true });
+    assert.equal(rHigher.latestVersion, "1.6.0");
+    assert.equal(rHigher.isIgnored, false);
+    assert.equal(rHigher.shouldNotify, true);
+
+    // 4) GitHub API 触发 403 限流时自动降级到 releases.atom，优先选最新稳定版 v1.5.1 并正确解码实体
+    ignoredVer = "";
+    mockMode = "api_403";
+    const rAtom = await svc.checkForUpdates({ force: true });
+    assert.equal(rAtom.ok, true);
+    assert.equal(rAtom.source, "github_atom");
+    assert.equal(rAtom.latestVersion, "1.5.1");
+    assert.ok(rAtom.bodySnippet.includes("修复 & 稳定性提升"), "Atom 内容实体应正确解码");
+
+    const atomDirect = parseReleasesAtom("<feed></feed>");
+    assert.equal(atomDirect, null);
+    assert.equal(computeUpdateNotificationState({ ok: true, latestVersion: "1.5.0", updateAvailable: true }, "v1.5.0").shouldNotify, false);
+
+    // 5) collector 持久化更新偏好且解绑时不清空
+    const colDir = fs.mkdtempSync(path.join(tmpDir, "col-upd-"));
+    const col = new MemberLedgerCollector({
+      configPath: path.join(colDir, "config.json"),
+      defaultConfigPath: path.join(colDir, "config.default.json"),
+      statePath: path.join(colDir, "state.json"),
+      transcriptRoots: [],
+    });
+    col.saveConfig({ autoCheckUpdates: false, ignoredUpdateVersion: "v1.5.0" });
+    assert.equal(col.getPublicState().config.autoCheckUpdates, false);
+    assert.equal(col.getPublicState().config.ignoredUpdateVersion, "1.5.0");
+    const afterUnbind = col.unbind();
+    assert.equal(afterUnbind.config.autoCheckUpdates, false);
+    assert.equal(afterUnbind.config.ignoredUpdateVersion, "1.5.0");
   });
 
   console.log(`\nALL E2E TESTS PASSED (${passed}/${passed})`);

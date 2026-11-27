@@ -29,6 +29,10 @@
       </div>
 
       <div class="header-actions">
+        <button class="btn-update-pill" id="btn-console-update-pill" title="发现 GitHub 新版本，点击前往查看更新" hidden>
+          <span class="update-dot"></span>
+          <span id="console-update-pill-label">新版</span>
+        </button>
         <button class="btn-ghost" id="btn-demo-seed" title="在本地离线模式下填入演示数据" hidden>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           <span>填充示例</span>
@@ -340,6 +344,27 @@
               <div class="btn-pair" style="margin-top:14px;">
                 <button class="btn-ink" id="btn-save-console-cfg">保存存储设置</button>
                 <button class="btn-ghost" id="btn-install-owner-settings">安装组长插件到本机</button>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="console-update-panel">
+              <div class="update-panel-head">
+                <h2 style="margin:0;">版本与 GitHub 更新</h2>
+                <span class="status-stamp" id="console-cur-ver-badge">v1.4.0</span>
+              </div>
+              <div class="toggle-row" style="margin-top:12px;">
+                <div>
+                  <div class="toggle-title">启动时静默检查 GitHub 更新</div>
+                  <div class="toggle-sub">6 小时缓存，发现未忽略的新版本时在顶栏显示温和提醒。</div>
+                </div>
+                <input type="checkbox" id="chk-console-auto-update" class="switch" checked/>
+              </div>
+              <div class="console-update-box" id="console-update-box">
+                <div>点击下方按钮即可从 GitHub Releases 检查最新版本。</div>
+              </div>
+              <div class="btn-pair" style="margin-top:12px;">
+                <button class="btn-ink" id="btn-console-check-update">立即检查更新</button>
+                <a class="btn-ghost ext-btn" id="console-releases-link" href="https://github.com/Curelove/agy-family-ledger/releases" target="_blank" rel="noopener">打开 GitHub Releases ↗</a>
               </div>
             </div>
 

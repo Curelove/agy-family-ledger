@@ -1,5 +1,5 @@
 /**
- * 成员端零隐私侵入数据采集器 (v1.3.1 · Windows / macOS / Linux 全平台零依赖)
+ * 成员端零隐私侵入数据采集器 (v1.4.0 · Windows / macOS / Linux 全平台零依赖)
  *
  * 严格隐私边界：
  * 1. 读取本机 Antigravity 会话日志 transcript.jsonl 时，仅读取顶层纯数字 Token 计数、模型名、步数索引与时间戳，
@@ -14,7 +14,7 @@ import http from "node:http";
 import tls from "node:tls";
 import crypto from "node:crypto";
 
-const CLIENT_VERSION = "1.3.1";
+const CLIENT_VERSION = "1.4.0";
 const MAX_PENDING_QUEUE = 1500;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES_PER_POLL = 8 * 1024 * 1024;
@@ -843,6 +843,8 @@ export class MemberLedgerCollector {
       proxyUrl: "",
       syncIntervalSec: 90,
       agreedRules: null,
+      autoCheckUpdates: true,
+      ignoredUpdateVersion: "",
     });
     const user = readJsonSafe(this.configPath, {});
     try {
@@ -850,7 +852,10 @@ export class MemberLedgerCollector {
     } catch {
       this._configMtimeMs = 0;
     }
-    return { ...def, ...user };
+    const merged = { ...def, ...user };
+    merged.autoCheckUpdates = merged.autoCheckUpdates !== false;
+    merged.ignoredUpdateVersion = String(merged.ignoredUpdateVersion || "").trim().replace(/^v/i, "");
+    return merged;
   }
 
   maybeReloadConfig() {
@@ -900,6 +905,13 @@ export class MemberLedgerCollector {
       throw new Error("代理地址需以 http:// 或 https:// 开头（例如 http://127.0.0.1:7897）");
     }
 
+    const nextAutoCheck =
+      patch.autoCheckUpdates !== undefined ? Boolean(patch.autoCheckUpdates) : this.config.autoCheckUpdates !== false;
+    const nextIgnoredUpdate =
+      patch.ignoredUpdateVersion !== undefined
+        ? String(patch.ignoredUpdateVersion || "").trim().replace(/^v/i, "")
+        : String(this.config.ignoredUpdateVersion || "").trim().replace(/^v/i, "");
+
     this.config = {
       ...this.config,
       serverUrl: String(nextUrl ?? this.config.serverUrl ?? "").trim().replace(/\/+$/, ""),
@@ -908,6 +920,8 @@ export class MemberLedgerCollector {
       proxyUrl: nextProxy,
       agreedRules: nextAgreed || null,
       syncIntervalSec: Math.max(30, Math.min(600, Number(patch.syncIntervalSec ?? this.config.syncIntervalSec) || 90)),
+      autoCheckUpdates: nextAutoCheck,
+      ignoredUpdateVersion: nextIgnoredUpdate,
     };
     writeJsonAtomic(this.configPath, this.config);
     try {
@@ -954,6 +968,8 @@ export class MemberLedgerCollector {
         tokenPreview: this.config.memberToken ? `${this.config.memberToken.slice(0, 8)}••••` : "",
         syncIntervalSec: this.config.syncIntervalSec || 90,
         agreedRules: this.config.agreedRules || null,
+        autoCheckUpdates: this.config.autoCheckUpdates !== false,
+        ignoredUpdateVersion: String(this.config.ignoredUpdateVersion || ""),
       },
       ruleMismatch,
       pendingQueueCount: Array.isArray(this.state.pendingEvents) ? this.state.pendingEvents.length : 0,

@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MemberLedgerCollector } from "./collector.mjs";
+import { UpdateService } from "./update-service.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +13,7 @@ const __dirname = path.dirname(__filename);
 const PANEL_HTML_PATH = path.join(__dirname, "panel.html");
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.default.json");
+const PLUGIN_ROOT = path.resolve(__dirname, "..", "..");
 const PANEL_SESSION_TOKEN = crypto.randomBytes(20).toString("hex");
 
 async function loadOfficialSidecarSdk() {
@@ -38,6 +40,30 @@ const collector = new MemberLedgerCollector({
   defaultConfigPath: DEFAULT_CONFIG_PATH,
 });
 
+const updateService = new UpdateService({
+  pluginRoot: PLUGIN_ROOT,
+  getProxyUrl: () => collector.config.proxyUrl || "",
+  getIgnoredVersion: () => collector.config.ignoredUpdateVersion || "",
+});
+
+function buildFullState() {
+  const base = collector.getPublicState();
+  const meta = updateService.getPluginMeta();
+  return {
+    ...base,
+    pluginMeta: meta,
+    update: updateService.getCachedResult(),
+  };
+}
+
+function enrichOut(out) {
+  if (!out || typeof out !== "object") return out;
+  return {
+    ...out,
+    state: buildFullState(),
+  };
+}
+
 function startSyncLoop() {
   setTimeout(() => {
     collector.syncOnce().catch(() => {});
@@ -46,6 +72,14 @@ function startSyncLoop() {
   setInterval(() => {
     collector.syncOnce().catch(() => {});
   }, intervalMs).unref();
+
+  // 启动后延迟静默检查 GitHub 更新（命中 6 小时缓存时不发网络请求）
+  setTimeout(() => {
+    collector.maybeReloadConfig();
+    if (collector.config.autoCheckUpdates !== false) {
+      updateService.checkForUpdates({ force: false }).catch(() => {});
+    }
+  }, 5500).unref();
 }
 
 function isAllowedLoopbackOrigin(req, port) {
@@ -58,6 +92,12 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   const { SidecarApp, Response } = await loadOfficialSidecarSdk();
   const app = new SidecarApp();
 
+  const jsonResp = (obj) =>
+    new Response(JSON.stringify(obj), {
+      contentType: "application/json; charset=utf-8",
+      headers: { "Cache-Control": "no-store" },
+    });
+
   app.api(
     "/",
     () =>
@@ -68,24 +108,13 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
     "GET"
   );
 
-  app.api(
-    "/api/state",
-    () =>
-      new Response(JSON.stringify(collector.getPublicState()), {
-        contentType: "application/json; charset=utf-8",
-        headers: { "Cache-Control": "no-store" },
-      }),
-    "GET"
-  );
+  app.api("/api/state", () => jsonResp(buildFullState()), "GET");
 
   app.api(
     "/api/sync-now",
     async () => {
       const out = await collector.syncOnce();
-      return new Response(JSON.stringify(out), {
-        contentType: "application/json; charset=utf-8",
-        headers: { "Cache-Control": "no-store" },
-      });
+      return jsonResp(enrichOut(out));
     },
     "POST"
   );
@@ -96,18 +125,9 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
       try {
         collector.saveConfig(data || {});
         const out = await collector.syncOnce();
-        return new Response(JSON.stringify(out), {
-          contentType: "application/json; charset=utf-8",
-          headers: { "Cache-Control": "no-store" },
-        });
+        return jsonResp(enrichOut(out));
       } catch (err) {
-        return new Response(
-          JSON.stringify({ ok: false, error: String(err?.message || err), state: collector.getPublicState() }),
-          {
-            contentType: "application/json; charset=utf-8",
-            headers: { "Cache-Control": "no-store" },
-          }
-        );
+        return jsonResp({ ok: false, error: String(err?.message || err), state: buildFullState() });
       }
     },
     "POST"
@@ -118,18 +138,9 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
     async () => {
       try {
         const out = await collector.confirmRules();
-        return new Response(JSON.stringify(out), {
-          contentType: "application/json; charset=utf-8",
-          headers: { "Cache-Control": "no-store" },
-        });
+        return jsonResp(enrichOut(out));
       } catch (err) {
-        return new Response(
-          JSON.stringify({ ok: false, error: String(err?.message || err), state: collector.getPublicState() }),
-          {
-            contentType: "application/json; charset=utf-8",
-            headers: { "Cache-Control": "no-store" },
-          }
-        );
+        return jsonResp({ ok: false, error: String(err?.message || err), state: buildFullState() });
       }
     },
     "POST"
@@ -138,10 +149,71 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.api(
     "/api/unbind",
     () => {
-      const state = collector.unbind();
-      return new Response(JSON.stringify({ ok: true, state }), {
-        contentType: "application/json; charset=utf-8",
-        headers: { "Cache-Control": "no-store" },
+      collector.unbind();
+      return jsonResp({ ok: true, state: buildFullState() });
+    },
+    "POST"
+  );
+
+  app.api(
+    "/api/update/status",
+    () => {
+      collector.maybeReloadConfig();
+      return jsonResp({
+        ok: true,
+        meta: updateService.getPluginMeta(),
+        update: updateService.getCachedResult(),
+        autoCheckUpdates: collector.config.autoCheckUpdates !== false,
+        ignoredUpdateVersion: collector.config.ignoredUpdateVersion || "",
+      });
+    },
+    "GET"
+  );
+
+  app.api(
+    "/api/update/check",
+    async (data) => {
+      collector.maybeReloadConfig();
+      const force = data?.force === "1" || data?.force === "true" || Boolean(data?.force);
+      const res = await updateService.checkForUpdates({ force });
+      return jsonResp(res);
+    },
+    "GET"
+  );
+
+  app.api(
+    "/api/update/check",
+    async (data) => {
+      collector.maybeReloadConfig();
+      const res = await updateService.checkForUpdates({ force: Boolean(data?.force) });
+      return jsonResp(res);
+    },
+    "POST"
+  );
+
+  app.api(
+    "/api/update/ignore",
+    (data) => {
+      const version = String(data?.version || "").trim().replace(/^v/i, "");
+      collector.saveConfig({ ignoredUpdateVersion: version });
+      return jsonResp({
+        ok: true,
+        update: updateService.getCachedResult(),
+        state: buildFullState(),
+      });
+    },
+    "POST"
+  );
+
+  app.api(
+    "/api/update/settings",
+    (data) => {
+      if (data && typeof data.autoCheckUpdates === "boolean") {
+        collector.saveConfig({ autoCheckUpdates: data.autoCheckUpdates });
+      }
+      return jsonResp({
+        ok: true,
+        state: buildFullState(),
       });
     },
     "POST"
@@ -171,46 +243,70 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
       } catch {}
     }
 
+    const sendJson = (obj, status = 200) => {
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(obj));
+    };
+
     if (u.pathname === "/api/state" && req.method === "GET") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(JSON.stringify(collector.getPublicState()));
-      return;
+      return sendJson(buildFullState());
     }
     if (u.pathname === "/api/sync-now" && req.method === "POST") {
       const out = await collector.syncOnce();
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify(out));
-      return;
+      return sendJson(enrichOut(out));
     }
     if (u.pathname === "/api/config" && req.method === "POST") {
       try {
         collector.saveConfig(body);
         const out = await collector.syncOnce();
-        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify(out));
+        return sendJson(enrichOut(out));
       } catch (err) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: String(err?.message || err), state: collector.getPublicState() }));
+        return sendJson({ ok: false, error: String(err?.message || err), state: buildFullState() }, 400);
       }
-      return;
     }
     if (u.pathname === "/api/confirm-rules" && req.method === "POST") {
       try {
         const out = await collector.confirmRules();
-        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify(out));
+        return sendJson(enrichOut(out));
       } catch (err) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: String(err?.message || err), state: collector.getPublicState() }));
+        return sendJson({ ok: false, error: String(err?.message || err), state: buildFullState() }, 400);
       }
-      return;
     }
     if (u.pathname === "/api/unbind" && req.method === "POST") {
-      const state = collector.unbind();
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, state }));
-      return;
+      collector.unbind();
+      return sendJson({ ok: true, state: buildFullState() });
     }
+    if (u.pathname === "/api/update/status" && req.method === "GET") {
+      collector.maybeReloadConfig();
+      return sendJson({
+        ok: true,
+        meta: updateService.getPluginMeta(),
+        update: updateService.getCachedResult(),
+        autoCheckUpdates: collector.config.autoCheckUpdates !== false,
+        ignoredUpdateVersion: collector.config.ignoredUpdateVersion || "",
+      });
+    }
+    if (u.pathname === "/api/update/check" && req.method === "GET") {
+      collector.maybeReloadConfig();
+      const force = u.searchParams.get("force") === "1" || u.searchParams.get("force") === "true";
+      return sendJson(await updateService.checkForUpdates({ force }));
+    }
+    if (u.pathname === "/api/update/check" && req.method === "POST") {
+      collector.maybeReloadConfig();
+      return sendJson(await updateService.checkForUpdates({ force: Boolean(body?.force) }));
+    }
+    if (u.pathname === "/api/update/ignore" && req.method === "POST") {
+      const version = String(body?.version || "").trim().replace(/^v/i, "");
+      collector.saveConfig({ ignoredUpdateVersion: version });
+      return sendJson({ ok: true, update: updateService.getCachedResult(), state: buildFullState() });
+    }
+    if (u.pathname === "/api/update/settings" && req.method === "POST") {
+      if (typeof body?.autoCheckUpdates === "boolean") {
+        collector.saveConfig({ autoCheckUpdates: body.autoCheckUpdates });
+      }
+      return sendJson({ ok: true, state: buildFullState() });
+    }
+
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(readPanelHtml(true));
   });

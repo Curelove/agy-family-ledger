@@ -882,6 +882,96 @@ input.switch:checked::after { transform: translateX(18px); }
 }
 .ext-link:hover { text-decoration: underline; }
 
+.btn-update-pill {
+  background: var(--pine-soft);
+  color: var(--pine);
+  border: 1px solid #BDD9D3;
+  border-radius: 99px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.btn-update-pill:hover { background: #D5E8E3; border-color: #9CC5BC; }
+.update-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pine);
+  display: inline-block;
+  flex-shrink: 0;
+}
+.update-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.console-update-box {
+  background: var(--page-surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 13px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+.console-update-title {
+  font-weight: 700;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.console-update-title.has-new { color: var(--pine); }
+.console-update-title.is-err { color: var(--vermilion); }
+.console-update-notes {
+  background: var(--hover-surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+.console-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+  align-items: center;
+}
+a.ext-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 9px;
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+}
+a.ext-btn-primary {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: var(--pine);
+  color: #FAF6EE;
+  border: 1px solid var(--pine);
+  border-radius: 8px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+}
+a.ext-btn-primary:hover { background: #22564E; }
+
 .empty-box {
   padding: 24px 16px;
   text-align: center;

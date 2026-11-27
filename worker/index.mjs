@@ -1,5 +1,5 @@
 /**
- * Cloudflare Workers 云端记账中转 (v1.3.1 · 免费层 0 元运行)
+ * Cloudflare Workers 云端记账中转 (v1.4.0 · 免费层 0 元运行)
  *
  * 环境变量：
  * - env.DB           : Cloudflare D1 数据库绑定
@@ -93,7 +93,7 @@ export default {
       return jsonResp({
         ok: true,
         service: "agy-family-ledger-worker",
-        version: "1.3.1",
+        version: "1.4.0",
         hasDb: Boolean(env?.DB),
         hasAdminSecret: Boolean(env?.ADMIN_SECRET),
       });

@@ -117,8 +117,9 @@ agy-family-ledger/
 │   ├── plugin.json
 │   └── sidecars/ledger/
 │       ├── collector.mjs        # 增量纯数字采集、绑定码校验、代理隧道与热重载
+│       ├── update-service.mjs   # 内置 GitHub Releases / Atom 更新检查（零注册表读取）
 │       ├── main.mjs             # Sidecar 服务与独立预览入口
-│       └── panel.html           # 侧边栏界面（含变价确认与扣费明细）
+│       └── panel.html           # 侧边栏界面（含变价确认、扣费明细与更新检查）
 ├── local-console/               # 组长本地管理控制台（CSRF 保护、无私货依赖）
 │   ├── server.mjs
 │   └── public/

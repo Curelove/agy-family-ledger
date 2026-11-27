@@ -2,5 +2,8 @@
   "serverUrl": "",
   "memberToken": "",
   "memberName": "",
-  "syncIntervalSec": 90
+  "proxyUrl": "",
+  "syncIntervalSec": 90,
+  "autoCheckUpdates": true,
+  "ignoredUpdateVersion": ""
 }

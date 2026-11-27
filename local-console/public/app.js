@@ -8,6 +8,10 @@ let currentConsoleCfg = null;
 let activeTopupMemberId = null;
 let activeInviteInfo = null;
 let expandedMemberIds = new Set();
+let currentUpdateMeta = null;
+let currentUpdateInfo = null;
+let consoleAutoCheckUpdates = true;
+let consoleStartupUpdateChecked = false;
 
 function showToast(msg) {
   const el = $("toast");
@@ -106,7 +110,7 @@ function renderMemberList(members) {
       }
 
       const tags = [];
-      if (isOwner) tags.push('<span class="role-tag">组长</span>');
+      if (isOwner) tags.push('<span class="role-tag">我自己</span>');
       if (isPaused) tags.push('<span class="role-tag warn">已暂停</span>');
       if (!isArchived && m.needsRuleConfirm) tags.push('<span class="role-tag warn">待确认新规则</span>');
       if (!isArchived && m.capReached) tags.push('<span class="role-tag warn">已达上限参考</span>');
@@ -748,5 +752,173 @@ $("btn-demo-seed").addEventListener("click", async () => {
   }
 });
 
+function renderConsoleUpdateUi() {
+  const curVer = String(currentUpdateMeta?.version || "1.4.0");
+  const fallbackRel = String(currentUpdateMeta?.releasesUrl || "https://github.com/Curelove/agy-family-ledger/releases");
+  $("console-cur-ver-badge").textContent = "v" + curVer;
+  $("console-releases-link").href = currentUpdateInfo?.releasesUrl || fallbackRel;
+  $("chk-console-auto-update").checked = consoleAutoCheckUpdates !== false;
+
+  const upd = currentUpdateInfo;
+  const shouldNotify = Boolean(upd && upd.ok && upd.shouldNotify && upd.latestVersion);
+  $("btn-console-update-pill").hidden = !shouldNotify;
+  if (shouldNotify) {
+    $("console-update-pill-label").textContent = "新版 v" + upd.latestVersion;
+  }
+
+  const box = $("console-update-box");
+  if (!upd) {
+    box.innerHTML = '<div>当前版本 <strong>v' + escapeHtml(curVer) + '</strong>，点击下方按钮即可从 GitHub Releases 检查最新更新。</div>';
+    return;
+  }
+  const relUrl = upd.releaseUrl || upd.releasesUrl || fallbackRel;
+  if (!upd.ok) {
+    box.innerHTML = `
+      <div class="console-update-title is-err">检查更新暂未连通</div>
+      <div style="margin-top:3px;">${escapeHtml(upd.error || "更新检查暂不可用")}</div>
+      <div class="console-update-actions">
+        <a class="btn-soft" style="text-decoration:none;" href="${escapeHtml(relUrl)}" target="_blank" rel="noopener">前往 Releases 页 ↗</a>
+      </div>`;
+    return;
+  }
+
+  const dateStr = upd.publishedAt ? String(upd.publishedAt).slice(0, 10) : "";
+  const srcNote = upd.source === "github_atom" ? " · Atom 源" : "";
+  if (upd.updateAvailable) {
+    const ignoredTag = upd.isIgnored ? '<span class="role-tag">已忽略此版本</span>' : "";
+    const notesHtml = upd.bodySnippet ? `<div class="console-update-notes">${escapeHtml(upd.bodySnippet)}</div>` : "";
+    const zipBtn = upd.zipDownloadUrl
+      ? `<a class="btn-soft" style="text-decoration:none;" href="${escapeHtml(upd.zipDownloadUrl)}" target="_blank" rel="noopener">下载插件 ZIP</a>`
+      : "";
+    const ignoreBtn = upd.isIgnored
+      ? `<button type="button" class="btn-soft" data-console-upd="unignore">取消忽略</button>`
+      : `<button type="button" class="btn-soft" data-console-upd="ignore" data-ver="${escapeHtml(upd.latestVersion)}">忽略此版本</button>`;
+    box.innerHTML = `
+      <div class="console-update-title has-new">发现新版本 v${escapeHtml(upd.latestVersion)}${ignoredTag}</div>
+      <div style="color:var(--muted);margin-top:2px;">当前 v${escapeHtml(curVer)}${dateStr ? " · 发布于 " + escapeHtml(dateStr) : ""}${srcNote}</div>
+      ${notesHtml}
+      <div class="console-update-actions">
+        <a class="ext-btn-primary" href="${escapeHtml(relUrl)}" target="_blank" rel="noopener">前往下载 v${escapeHtml(upd.latestVersion)} ↗</a>
+        ${zipBtn}
+        <button type="button" class="btn-soft" data-console-upd="copy" data-url="${escapeHtml(relUrl)}">复制链接</button>
+        ${ignoreBtn}
+      </div>`;
+    return;
+  }
+
+  const sameTag = String(upd.latestVersion || "") === curVer;
+  const subInfo = sameTag
+    ? (dateStr ? `最新 Release 发布于 ${escapeHtml(dateStr)}` : "与 GitHub 最新版本一致")
+    : `GitHub 最新 Release 为 v${escapeHtml(upd.latestVersion)}${dateStr ? " · " + escapeHtml(dateStr) : ""}`;
+  box.innerHTML = `
+    <div class="console-update-title">已是最新版本 v${escapeHtml(curVer)}</div>
+    <div style="color:var(--muted);margin-top:2px;">${subInfo}${srcNote}</div>
+    <div class="console-update-actions">
+      <a class="btn-soft" style="text-decoration:none;" href="${escapeHtml(relUrl)}" target="_blank" rel="noopener">查看更新日志 ↗</a>
+    </div>`;
+}
+
+async function loadConsoleUpdateStatus() {
+  try {
+    const res = await api("/api/update/status");
+    currentUpdateMeta = res.meta || null;
+    currentUpdateInfo = res.update || null;
+    consoleAutoCheckUpdates = res.autoCheckUpdates !== false;
+    renderConsoleUpdateUi();
+    if (!consoleStartupUpdateChecked) {
+      consoleStartupUpdateChecked = true;
+      if (consoleAutoCheckUpdates) {
+        setTimeout(() => {
+          void checkConsoleUpdates(false);
+        }, 2000);
+      }
+    }
+  } catch {}
+}
+
+async function checkConsoleUpdates(force = false) {
+  const btn = $("btn-console-check-update");
+  if (force && btn) {
+    btn.disabled = true;
+    btn.textContent = "检查中…";
+  }
+  try {
+    const res = force
+      ? await fetch("/api/update/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(consoleToken ? { "X-Console-Token": consoleToken } : {}) },
+          body: JSON.stringify({ force: true }),
+        }).then((r) => r.json())
+      : await fetch("/api/update/check").then((r) => r.json());
+    if (res && typeof res === "object") {
+      currentUpdateInfo = res;
+      renderConsoleUpdateUi();
+      if (force) {
+        if (!res.ok) showToast(res.error || "更新检查未连通");
+        else if (res.updateAvailable) showToast("发现新版本 v" + res.latestVersion);
+        else showToast("当前已是最新版本 v" + (res.currentVersion || currentUpdateMeta?.version || "1.4.0"));
+      }
+    }
+  } catch (err) {
+    if (force) showToast("检查更新失败：" + err.message);
+  } finally {
+    if (force && btn) {
+      btn.disabled = false;
+      btn.textContent = "立即检查更新";
+    }
+  }
+}
+
+$("btn-console-update-pill").addEventListener("click", () => {
+  const settingsBtn = document.querySelector('.index-tab[data-tab="settings"]');
+  if (settingsBtn) settingsBtn.click();
+  $("console-update-panel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+
+$("btn-console-check-update").addEventListener("click", () => {
+  void checkConsoleUpdates(true);
+});
+
+$("chk-console-auto-update").addEventListener("change", async (e) => {
+  const checked = Boolean(e.currentTarget.checked);
+  try {
+    await api("/api/update/settings", { method: "POST", body: JSON.stringify({ autoCheckUpdates: checked }) });
+    consoleAutoCheckUpdates = checked;
+    showToast(checked ? "已开启启动时静默检查更新" : "已关闭启动时自动检查更新");
+  } catch (err) {
+    showToast(err.message);
+  }
+});
+
+$("console-update-box").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-console-upd]");
+  if (!btn) return;
+  const act = btn.dataset.consoleUpd;
+  if (act === "copy") {
+    await navigator.clipboard?.writeText(btn.dataset.url || "").catch(() => {});
+    showToast("已复制 GitHub Releases 链接");
+  } else if (act === "ignore") {
+    const ver = btn.dataset.ver || currentUpdateInfo?.latestVersion || "";
+    try {
+      const res = await api("/api/update/ignore", { method: "POST", body: JSON.stringify({ version: ver }) });
+      if (res.update) currentUpdateInfo = res.update;
+      renderConsoleUpdateUi();
+      showToast(`已忽略 v${ver}，更高版本发布时将恢复提醒`);
+    } catch (err) {
+      showToast(err.message);
+    }
+  } else if (act === "unignore") {
+    try {
+      const res = await api("/api/update/ignore", { method: "POST", body: JSON.stringify({ version: "" }) });
+      if (res.update) currentUpdateInfo = res.update;
+      renderConsoleUpdateUi();
+      showToast("已恢复新版本更新提醒");
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+});
+
 refreshAll();
+loadConsoleUpdateStatus();
 setInterval(refreshAll, 45000);

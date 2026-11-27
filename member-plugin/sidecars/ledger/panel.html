@@ -214,6 +214,115 @@
     border-radius: 10px; padding: 9px 11px; display: flex; gap: 8px; align-items: flex-start;
   }
   .privacy-note svg { flex-shrink: 0; margin-top: 2px; }
+
+  .header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .update-pill {
+    background: var(--pine-soft); color: var(--pine);
+    border: 1px solid #BDD9D3; border-radius: 99px;
+    padding: 4px 9px; font-size: 12px; font-weight: 700;
+    display: inline-flex; align-items: center; gap: 5px;
+    white-space: nowrap;
+  }
+  .update-pill:hover { background: #D7EAE5; border-color: #9DC6BC; }
+  .update-pill-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--pine); display: inline-block; flex-shrink: 0;
+  }
+
+  .update-alert-card {
+    background: var(--pine-soft);
+    border: 1px solid #BDD9D3;
+    border-radius: 12px;
+    padding: 11px 13px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #1F4E47;
+  }
+  .update-alert-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-bottom: 5px;
+  }
+  .update-alert-title {
+    font-weight: 700; font-size: 13px; color: #163C36;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+  .update-ver-tag {
+    font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 99px;
+    background: #FFFFFF; color: var(--pine); border: 1px solid #BDD9D3;
+  }
+  .update-alert-close {
+    padding: 2px 6px; border-radius: 6px; background: transparent;
+    border-color: transparent; color: #2D6A62; font-size: 13px; line-height: 1;
+  }
+  .update-alert-close:hover { background: rgba(45, 106, 98, 0.12); border-color: transparent; }
+  .update-alert-snippet {
+    line-height: 1.5; color: #26564F; margin-bottom: 9px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .update-alert-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+  .update-alert-actions button { padding: 5px 10px; }
+  .update-alert-actions button.primary { width: auto; flex: 1; min-width: 90px; background: var(--pine); border-color: var(--pine); }
+  .update-alert-actions button.primary:hover { background: #23544E; }
+
+  .update-meta-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: var(--muted); margin-bottom: 9px;
+  }
+  .update-meta-row strong { color: var(--ink); }
+  .inline-link {
+    color: var(--pine); text-decoration: none; font-weight: 600;
+  }
+  .inline-link:hover { text-decoration: underline; }
+  .check-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: var(--paper); border-radius: 8px; padding: 8px 10px;
+    margin-bottom: 10px; font-size: 12px; color: var(--ink-soft); cursor: pointer;
+  }
+  .check-row input[type="checkbox"] {
+    width: 15px; height: 15px; accent-color: var(--pine); margin: 0; flex-shrink: 0; cursor: pointer;
+  }
+  .update-box {
+    background: var(--paper); border: 1px solid var(--border);
+    border-radius: 9px; padding: 10px 11px; margin-bottom: 10px;
+    font-size: 12px; color: var(--ink-soft); line-height: 1.55;
+  }
+  .update-box-title {
+    font-weight: 700; color: var(--ink); margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+  .update-box-title.has-new { color: var(--pine); }
+  .update-box-title.is-err { color: var(--vermilion); }
+  .update-ignored-pill {
+    font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+    background: var(--amber-soft); color: #7C4B1F;
+  }
+  .update-notes {
+    background: var(--card); border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 9px; margin: 7px 0; max-height: 120px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--ink-soft);
+    line-height: 1.5;
+  }
+  .update-upgrade-tip {
+    font-size: 11.5px; color: var(--muted); margin: 5px 0 8px;
+  }
+  .update-box-actions {
+    display: flex; gap: 7px; flex-wrap: wrap; align-items: center; margin-top: 7px;
+  }
+  .btn-link-primary {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    background: var(--pine); color: #FAF7F2; border: 1px solid var(--pine);
+    border-radius: 8px; padding: 5px 11px; font-size: 12px; font-weight: 600;
+    text-decoration: none; transition: background 0.15s;
+  }
+  .btn-link-primary:hover { background: #23544E; }
+  .btn-link-soft {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    background: var(--card); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+    text-decoration: none; transition: background 0.15s;
+  }
+  .btn-link-soft:hover { background: var(--well); }
+  .update-summary-badge.has-new { color: var(--pine) !important; font-weight: 700 !important; }
 </style>
 </head>
 <body>
@@ -226,10 +335,16 @@
         <span id="sync-text">正在读取同步状态…</span>
       </div>
     </div>
-    <button id="btn-sync" title="立即同步一次用量">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
-      <span>同步</span>
-    </button>
+    <div class="header-actions">
+      <button class="update-pill" id="btn-update-pill" hidden title="发现 GitHub 新版本，点击查看更新">
+        <span class="update-pill-dot"></span>
+        <span id="update-pill-label">新版</span>
+      </button>
+      <button id="btn-sync" title="立即同步一次用量">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+        <span>同步</span>
+      </button>
+    </div>
   </div>
 
   <!-- 规则、使用约定或单价变动确认提醒（防组长静默修改） -->
@@ -243,6 +358,24 @@
     <div class="rule-btn-row">
       <button class="primary" id="btn-confirm-rules">确认接受新规则</button>
       <button class="danger-soft" id="btn-unbind-reject">暂不接受并断开</button>
+    </div>
+  </section>
+
+  <!-- GitHub Releases 新版本温和提醒卡片（可忽略此版本，下个更高版本发布时恢复提醒） -->
+  <section class="update-alert-card" id="update-alert-card" hidden>
+    <div class="update-alert-head">
+      <div class="update-alert-title">
+        <span class="update-pill-dot"></span>
+        <span>发现新版本</span>
+        <span class="update-ver-tag" id="update-alert-ver">v--</span>
+      </div>
+      <button class="update-alert-close" id="btn-update-alert-later-x" title="本次会话稍后提醒" aria-label="稍后提醒">×</button>
+    </div>
+    <div class="update-alert-snippet" id="update-alert-snippet">可从 GitHub Releases 下载官方构建包覆盖升级，原有绑定配置自动保留。</div>
+    <div class="update-alert-actions">
+      <button class="primary" id="btn-update-alert-view">查看更新</button>
+      <button id="btn-update-alert-ignore">忽略此版本</button>
+      <button id="btn-update-alert-later">稍后</button>
     </div>
   </section>
 
@@ -395,6 +528,28 @@
     </div>
   </details>
 
+  <!-- 版本与 GitHub 更新检查（日常收起，发现新版本时高亮提示） -->
+  <details id="update-details">
+    <summary>
+      <span>版本与更新</span>
+      <span class="update-summary-badge" style="color:var(--muted);font-weight:400;" id="update-summary-badge">v--</span>
+    </summary>
+    <div class="details-body">
+      <div class="update-meta-row">
+        <span>当前版本：<strong id="update-cur-ver">v--</strong></span>
+        <a class="inline-link" id="update-releases-link" href="https://github.com/Curelove/agy-family-ledger/releases" target="_blank" rel="noopener">GitHub Releases ↗</a>
+      </div>
+      <label class="check-row" for="chk-auto-update">
+        <span>启动时静默检查 GitHub 更新（6 小时缓存）</span>
+        <input type="checkbox" id="chk-auto-update" checked/>
+      </label>
+      <div class="update-box" id="update-status-box">
+        <div>点击下方按钮即可从 GitHub Releases 检查最新版本。</div>
+      </div>
+      <button class="primary" id="btn-check-update">立即检查更新</button>
+    </div>
+  </details>
+
   <div class="privacy-note">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
     <span>数据说明：插件仅上报本地对话步骤的纯数字 Token 计数、模型名、时间戳、在线心跳与官方剩余配额百分比，不读取任何代码、对话正文、思考过程或本机进程。</span>
@@ -406,11 +561,123 @@ const $ = (id) => document.getElementById(id);
 const yuan = (fen) => "¥" + ((Number(fen) || 0) / 100).toFixed(2);
 const pctText = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(1) + "%" : "--");
 const panelToken = document.querySelector('meta[name="panel-token"]')?.content || "";
+let latestStateCache = null;
+let latestUpdateInfo = null;
+let sessionDismissedUpdateVer = "";
+let startupUpdateChecked = false;
 
 function postHeaders() {
   const h = { "Content-Type": "application/json" };
   if (panelToken) h["X-Panel-Token"] = panelToken;
   return h;
+}
+
+function renderUpdateUi(state) {
+  const meta = state?.pluginMeta || {};
+  const curVer = String(meta.version || state?.clientVersion || "1.4.0");
+  const fallbackReleasesUrl = String(meta.releasesUrl || "https://github.com/Curelove/agy-family-ledger/releases");
+  const autoCheck = state?.config?.autoCheckUpdates !== false;
+
+  if (state?.update && typeof state.update === "object") {
+    const prevAt = Number(latestUpdateInfo?.checkedAt || 0);
+    const nextAt = Number(state.update.checkedAt || 0);
+    if (!latestUpdateInfo || nextAt >= prevAt || state.update.ignoredVersion !== latestUpdateInfo.ignoredVersion) {
+      latestUpdateInfo = state.update;
+    }
+  }
+  const upd = latestUpdateInfo;
+
+  $("update-cur-ver").textContent = "v" + curVer;
+  $("update-releases-link").href = upd?.releasesUrl || fallbackReleasesUrl;
+  $("chk-auto-update").checked = autoCheck;
+
+  const shouldNotify = Boolean(upd && upd.ok && upd.shouldNotify && upd.latestVersion);
+  const updateAvail = Boolean(upd && upd.ok && upd.updateAvailable && upd.latestVersion);
+
+  $("btn-update-pill").hidden = !shouldNotify;
+  if (shouldNotify) {
+    $("update-pill-label").textContent = "新版 v" + upd.latestVersion;
+  }
+
+  const summaryBadge = $("update-summary-badge");
+  if (shouldNotify) {
+    summaryBadge.textContent = "发现新版 v" + upd.latestVersion;
+    summaryBadge.classList.add("has-new");
+  } else {
+    summaryBadge.textContent = "v" + curVer;
+    summaryBadge.classList.remove("has-new");
+  }
+
+  const showAlertCard = Boolean(
+    shouldNotify &&
+    upd.latestVersion !== sessionDismissedUpdateVer &&
+    !$("update-details").open
+  );
+  $("update-alert-card").hidden = !showAlertCard;
+  if (showAlertCard) {
+    $("update-alert-ver").textContent = "v" + upd.latestVersion;
+    const rawSnippet = String(upd.bodySnippet || "").replace(/\s+/g, " ").trim().slice(0, 140);
+    $("update-alert-snippet").textContent =
+      rawSnippet || "当前 v" + curVer + " → 最新 v" + upd.latestVersion + "，下载官方构建包覆盖安装即可，绑定配置自动保留。";
+  }
+
+  const box = $("update-status-box");
+  if (!upd) {
+    box.innerHTML = '<div>点击下方按钮即可从 GitHub Releases 检查最新版本。</div>';
+    return;
+  }
+  const relUrl = upd.releaseUrl || upd.releasesUrl || fallbackReleasesUrl;
+  if (!upd.ok) {
+    box.innerHTML =
+      '<div class="update-box-title is-err">检查更新暂未连通</div>' +
+      '<div>' + esc(upd.error || "更新检查暂不可用") + "</div>" +
+      '<div class="update-box-actions">' +
+      '<a class="btn-link-soft" href="' + esc(relUrl) + '" target="_blank" rel="noopener">打开 Releases 页 ↗</a>' +
+      '<button type="button" data-copy-url="' + esc(relUrl) + '">复制链接</button>' +
+      "</div>";
+    return;
+  }
+
+  const dateStr = upd.publishedAt ? String(upd.publishedAt).slice(0, 10) : "";
+  const srcNote = upd.source === "github_atom" ? " · Atom 源" : "";
+
+  if (updateAvail) {
+    const ignoredTag = upd.isIgnored
+      ? '<span class="update-ignored-pill">已忽略此版本</span>'
+      : "";
+    const notesHtml = upd.bodySnippet
+      ? '<div class="update-notes">' + esc(upd.bodySnippet) + "</div>"
+      : "";
+    const zipBtn = upd.zipDownloadUrl
+      ? '<a class="btn-link-soft" href="' + esc(upd.zipDownloadUrl) + '" target="_blank" rel="noopener">直接下载 ZIP</a>'
+      : "";
+    const ignoreBtn = upd.isIgnored
+      ? '<button type="button" data-upd-action="unignore">取消忽略</button>'
+      : '<button type="button" data-upd-action="ignore" data-upd-ver="' + esc(upd.latestVersion) + '">忽略此版本</button>';
+    box.innerHTML =
+      '<div class="update-box-title has-new">发现新版本 v' + esc(upd.latestVersion) + ignoredTag + "</div>" +
+      '<div style="color:var(--muted);">当前 v' + esc(curVer) + (dateStr ? " · 发布于 " + esc(dateStr) : "") + srcNote + "</div>" +
+      notesHtml +
+      '<div class="update-upgrade-tip">下载官方构建包解压后运行安装脚本即可覆盖升级，原有绑定配置自动保留。</div>' +
+      '<div class="update-box-actions">' +
+      '<a class="btn-link-primary" href="' + esc(relUrl) + '" target="_blank" rel="noopener">前往下载 v' + esc(upd.latestVersion) + " ↗</a>" +
+      zipBtn +
+      '<button type="button" data-copy-url="' + esc(relUrl) + '">复制链接</button>' +
+      ignoreBtn +
+      "</div>";
+    return;
+  }
+
+  const sameTag = String(upd.latestVersion || "") === curVer;
+  const subInfo = sameTag
+    ? (dateStr ? "最新 Release 发布于 " + esc(dateStr) : "与 GitHub 最新版本一致")
+    : "GitHub 最新 Release 为 v" + esc(upd.latestVersion) + (dateStr ? " · " + esc(dateStr) : "");
+  box.innerHTML =
+    '<div class="update-box-title">已是最新版本 v' + esc(curVer) + "</div>" +
+    '<div style="color:var(--muted);">' + subInfo + srcNote + "</div>" +
+    '<div class="update-box-actions">' +
+    '<a class="btn-link-soft" href="' + esc(relUrl) + '" target="_blank" rel="noopener">查看更新日志 ↗</a>' +
+    "</div>";
 }
 
 function esc(s) {
@@ -436,6 +703,9 @@ function fmtShortTime(iso) {
 }
 
 function render(state) {
+  latestStateCache = state;
+  renderUpdateUi(state);
+
   const mv = state.memberView;
   const dot = $("sync-dot");
   const syncText = $("sync-text");
@@ -487,7 +757,11 @@ function render(state) {
   const fmtLimit = (v) => (Number.isInteger(v) ? v + "%" : v.toFixed(1) + "%");
 
   $("family-title").textContent = mv.pricing?.familyName || "家庭组额度看板";
-  $("member-name-badge").textContent = mv.name + (mv.role === "owner" ? "（组长）" : "");
+  const selfCleanName = String(mv.name || "").replace(/[（(]我自己[）)]$/, "").trim() || (mv.role === "owner" ? "组长" : "成员");
+  $("member-name-badge").textContent =
+    mv.role === "owner"
+      ? (selfCleanName === "组长" ? "组长" : selfCleanName + "（组长）")
+      : selfCleanName;
 
   $("my-gem-pct").textContent = (mv.weekSummary?.geminiPct || 0).toFixed(2) + "%";
   $("my-3p-pct").textContent = (mv.weekSummary?.thirdPartyPct || 0).toFixed(2) + "%";
@@ -624,7 +898,8 @@ function render(state) {
     $("peer-list").innerHTML = peers
       .map((p) => {
         const dotCls = p.online ? "dot ok" : "dot";
-        const tag = p.isSelf ? "我" : p.role === "owner" ? "组长" : "";
+        const displayName = String(p.name || "").replace(/[（(]我自己[）)]$/, "").trim() || (p.role === "owner" ? "组长" : "成员");
+        const tag = p.isSelf ? "我" : (p.role === "owner" && displayName !== "组长" ? "组长" : "");
         const capBadge = p.capReached ? '<span class="peer-tag warn">达上限</span>' : "";
         const h5Parts = [];
         if (Number(p.recent5hGeminiShare || 0) > 0) h5Parts.push("Gemini " + Number(p.recent5hGeminiShare).toFixed(0) + "%");
@@ -632,7 +907,7 @@ function render(state) {
         const h5Line = h5Parts.length ? '<div class="peer-5h">近 5h 占 ' + h5Parts.join(" · ") + "</div>" : "";
         return (
           '<div class="peer-row">' +
-          '<div class="peer-name"><span class="' + dotCls + '"></span><span>' + esc(p.name) + "</span>" +
+          '<div class="peer-name"><span class="' + dotCls + '"></span><span>' + esc(displayName) + "</span>" +
           (tag ? '<span class="peer-tag">' + tag + "</span>" : "") + capBadge +
           "</div>" +
           '<div class="peer-right"><div class="peer-nums">Gemini ' + Number(p.geminiPct || 0).toFixed(1) + "% · 3P " + Number(p.thirdPartyPct || 0).toFixed(1) + "%</div>" + h5Line + "</div>" +
@@ -760,10 +1035,129 @@ async function handleUnbind() {
   if (data.state) render(data.state);
 }
 
+async function runUpdateCheck(force = false) {
+  const btn = $("btn-check-update");
+  if (force && btn) {
+    btn.disabled = true;
+    btn.textContent = "正在检查 GitHub 更新…";
+  }
+  try {
+    const res = force
+      ? await fetch("/api/update/check", {
+          method: "POST",
+          headers: postHeaders(),
+          body: JSON.stringify({ force: true }),
+        })
+      : await fetch("/api/update/check");
+    const data = await res.json().catch(() => null);
+    if (data && typeof data === "object") {
+      latestUpdateInfo = data;
+      renderUpdateUi(latestStateCache || {});
+    }
+  } catch (err) {
+    if (force) {
+      latestUpdateInfo = { ok: false, error: "检查更新失败：" + String(err?.message || err) };
+      renderUpdateUi(latestStateCache || {});
+    }
+  } finally {
+    if (force && btn) {
+      btn.disabled = false;
+      btn.textContent = "立即检查更新";
+    }
+  }
+}
+
+async function setIgnoredUpdateVersion(ver) {
+  const res = await fetch("/api/update/ignore", {
+    method: "POST",
+    headers: postHeaders(),
+    body: JSON.stringify({ version: ver }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (data.update) latestUpdateInfo = data.update;
+  if (data.state) {
+    render(data.state);
+  } else {
+    renderUpdateUi(latestStateCache || {});
+  }
+}
+
+function openUpdateSection() {
+  const det = $("update-details");
+  det.open = true;
+  if (latestUpdateInfo?.latestVersion) {
+    sessionDismissedUpdateVer = latestUpdateInfo.latestVersion;
+  }
+  renderUpdateUi(latestStateCache || {});
+  det.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 async function loadState() {
   const res = await fetch("/api/state");
-  render(await res.json());
+  const st = await res.json();
+  render(st);
+  if (!startupUpdateChecked) {
+    startupUpdateChecked = true;
+    if (st?.config?.autoCheckUpdates !== false) {
+      setTimeout(() => {
+        runUpdateCheck(false).catch(() => {});
+      }, 1800);
+    }
+  }
 }
+
+$("btn-update-pill").addEventListener("click", openUpdateSection);
+$("btn-update-alert-view").addEventListener("click", openUpdateSection);
+$("btn-update-alert-ignore").addEventListener("click", () => {
+  if (latestUpdateInfo?.latestVersion) setIgnoredUpdateVersion(latestUpdateInfo.latestVersion);
+});
+$("btn-update-alert-later").addEventListener("click", () => {
+  if (latestUpdateInfo?.latestVersion) sessionDismissedUpdateVer = latestUpdateInfo.latestVersion;
+  renderUpdateUi(latestStateCache || {});
+});
+$("btn-update-alert-later-x").addEventListener("click", () => {
+  if (latestUpdateInfo?.latestVersion) sessionDismissedUpdateVer = latestUpdateInfo.latestVersion;
+  renderUpdateUi(latestStateCache || {});
+});
+$("update-details").addEventListener("toggle", () => {
+  renderUpdateUi(latestStateCache || {});
+});
+$("btn-check-update").addEventListener("click", () => {
+  runUpdateCheck(true);
+});
+$("chk-auto-update").addEventListener("change", async (e) => {
+  const checked = Boolean(e.currentTarget.checked);
+  const res = await fetch("/api/update/settings", {
+    method: "POST",
+    headers: postHeaders(),
+    body: JSON.stringify({ autoCheckUpdates: checked }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (data.state) render(data.state);
+});
+$("update-status-box").addEventListener("click", async (e) => {
+  const copyBtn = e.target.closest("[data-copy-url]");
+  if (copyBtn) {
+    const url = copyBtn.getAttribute("data-copy-url") || "";
+    try {
+      await navigator.clipboard.writeText(url);
+      const prev = copyBtn.textContent;
+      copyBtn.textContent = "已复制";
+      setTimeout(() => { copyBtn.textContent = prev; }, 1600);
+    } catch {}
+    return;
+  }
+  const actBtn = e.target.closest("[data-upd-action]");
+  if (actBtn) {
+    const act = actBtn.getAttribute("data-upd-action");
+    if (act === "ignore") {
+      const ver = actBtn.getAttribute("data-upd-ver") || latestUpdateInfo?.latestVersion || "";
+      if (ver) await setIgnoredUpdateVersion(ver);
+    } else if (act === "unignore") {
+      await setIgnoredUpdateVersion("");
+    }
+  }
+});
 
 $("btn-sync").addEventListener("click", async () => {
   $("btn-sync").disabled = true;
