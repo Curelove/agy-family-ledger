@@ -45,7 +45,7 @@ const pluginDst = path.join(bundleDir, "agy-family-ledger");
 function copyCleanPlugin(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
-    if (ent.name === "config.json" || ent.name.startsWith(".")) continue;
+    if (ent.name === "config.json" || ent.name === "backups" || ent.name.startsWith(".")) continue;
     const s = path.join(src, ent.name);
     const d = path.join(dst, ent.name);
     if (ent.isDirectory()) copyCleanPlugin(s, d);
@@ -185,11 +185,12 @@ try {
     "- 需要 Antigravity App（支持侧边栏 Sidecar 扩展）与本机已安装 Node.js 20+。",
     "",
     "安装与连接步骤：",
-    "1. Windows：完整解压本压缩包后，双击运行 install_windows.cmd（升级重装不会清除已有绑定）。",
-    "   macOS / Linux：解压后在终端运行 bash install_macos_linux.sh（自动保留绑定并写入本机 node 路径）。",
+    "1. Windows：完整解压本压缩包后，双击运行 install_windows.cmd（升级覆盖会自动保留已有绑定、代理与账号锁设置）。",
+    "   macOS / Linux：解压后在终端运行 bash install_macos_linux.sh（自动保留已有 config.json 并写入本机 node 绝对路径）。",
     "2. 重启 Antigravity App，在扩展管理页面确认「家庭组额度看板（agy-family-ledger）」已启用。",
     "3. 在右侧边栏打开「家庭组额度看板」，粘贴组长提供的单行绑定码并点击「连接看板」。",
-    "4. 若使用免费 workers.dev 地址且直连超时，可在「连接配置」中填写本地 HTTP 代理地址（如 http://127.0.0.1:7897）。",
+    "4. 切换至个人其他账号时，侧边栏会自动暂停计入家庭组并在切回后从此刻起算（仍可实时查看全组余量）；如需临时停采也可一键「暂停统计」。",
+    "5. 若使用免费 workers.dev 地址且直连超时，可在「连接配置」中填写本地 HTTP 代理地址（如 http://127.0.0.1:7897）。",
     "",
     "彻底卸载：",
     "- Windows 双击运行 uninstall_windows.cmd，macOS / Linux 运行 bash uninstall_macos_linux.sh，可同步清理插件与本地状态文件。",

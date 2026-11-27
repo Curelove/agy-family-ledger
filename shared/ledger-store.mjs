@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 统一数据存储层 (v1.3.1)
+ * Antigravity 家庭组共享额度看板 · 统一数据存储层 (v1.6.0)
  *
  * 兼容两类 SQLite 后端（纯标准 JS，零 Node 专有依赖，可直接部署 Cloudflare Workers）：
  * 1. Cloudflare D1（通过 wrapD1Adapter(env.DB)）
@@ -9,6 +9,7 @@ import {
   DEFAULT_SETTINGS,
   alignSliceStartMs,
   classifyModelPool,
+  isArgonModel,
   computeWeightedUnits,
   deriveWeekBucket,
   evaluateQuotaDelta,
@@ -19,6 +20,9 @@ import {
   normalizePctLimit,
   sanitizeUsageRuleNote,
   computeRuleNoteHash,
+  normalizeAccountHash,
+  normalizeAccountTier,
+  normalizeCollectionStatus,
 } from "./billing-engine.mjs";
 
 const BLACKHOLE_BUFFER_KEY = "_internal_blackhole_buffer";
@@ -36,6 +40,62 @@ const RULE_PRICING_KEYS = [
   "restrict_3p_for_members",
   "usage_rule_note",
 ];
+
+function isVersionAtLeast(ver = "", minMajor = 1, minMinor = 6) {
+  const m = String(ver || "").trim().replace(/^v/i, "").match(/^(\d+)\.(\d+)/);
+  if (!m) return false;
+  const maj = Number(m[1]);
+  const min = Number(m[2]);
+  return maj > minMajor || (maj === minMajor && min >= minMinor);
+}
+
+function sanitizeDeviceId(raw = "") {
+  const s = String(raw || "").trim();
+  if (!s || s.length > 32) return "";
+  return /^[A-Za-z0-9_-]{4,32}$/.test(s) ? s : "";
+}
+
+function parseDevicesMap(rawJson = "{}") {
+  try {
+    const obj = typeof rawJson === "string" ? JSON.parse(rawJson || "{}") : rawJson;
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+    return obj;
+  } catch {
+    return {};
+  }
+}
+
+function mergeMemberDevices(rawJson, deviceId, entry, nowMs) {
+  const map = parseDevicesMap(rawJson);
+  if (deviceId) {
+    map[deviceId] = entry;
+  }
+  const cutoff30d = nowMs - 30 * 24 * 3600 * 1000;
+  const entries = Object.entries(map)
+    .filter(([, v]) => v && typeof v === "object" && Number(v.lastSeenMs || 0) >= cutoff30d)
+    .sort((a, b) => Number(b[1].lastSeenMs || 0) - Number(a[1].lastSeenMs || 0))
+    .slice(0, 6);
+  const out = {};
+  for (const [k, v] of entries) out[k] = v;
+  return JSON.stringify(out);
+}
+
+function formatDevicesList(rawJson, nowMs, offlineGraceMs) {
+  const map = parseDevicesMap(rawJson);
+  return Object.entries(map)
+    .map(([deviceId, v]) => {
+      const lastSeenMs = Number(v?.lastSeenMs || (v?.lastSeenAt ? Date.parse(v.lastSeenAt) : 0) || 0);
+      return {
+        deviceId,
+        lastSeenAt: v?.lastSeenAt || (lastSeenMs > 0 ? new Date(lastSeenMs).toISOString() : null),
+        lastSeenMs,
+        clientVersion: String(v?.clientVersion || ""),
+        collectionStatus: normalizeCollectionStatus(v?.collectionStatus || "active"),
+        online: Boolean(lastSeenMs > 0 && nowMs - lastSeenMs <= offlineGraceMs),
+      };
+    })
+    .sort((a, b) => b.lastSeenMs - a.lastSeenMs);
+}
 
 function randomHex(bytes = 12) {
   const arr = new Uint8Array(bytes);
@@ -132,6 +192,12 @@ export class LedgerStore {
       "ALTER TABLE members ADD COLUMN accepted_rule_version INTEGER NOT NULL DEFAULT 1",
       "ALTER TABLE usage_reports ADD COLUMN settled_snapshot_id INTEGER DEFAULT NULL",
       "ALTER TABLE usage_reports ADD COLUMN event_ts_ms INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE members ADD COLUMN bound_account_hash TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE members ADD COLUMN bound_account_locked_by_admin INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE members ADD COLUMN account_tier TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE members ADD COLUMN collection_status TEXT NOT NULL DEFAULT 'active'",
+      "ALTER TABLE members ADD COLUMN devices_json TEXT NOT NULL DEFAULT '{}'",
+      "ALTER TABLE pool_snapshots ADD COLUMN account_hash TEXT NOT NULL DEFAULT ''",
     ];
     for (const sql of migrations) {
       try {
@@ -211,6 +277,12 @@ export class LedgerStore {
     out.restrict_3p_for_members = Boolean(out.restrict_3p_for_members);
     out.broadcast_blackhole_to_members = out.broadcast_blackhole_to_members !== false;
     out.usage_rule_note = sanitizeUsageRuleNote(out.usage_rule_note);
+    out.account_isolation_mode =
+      out.account_isolation_mode === "shared_owner_account" ? "shared_owner_account" : "per_member_lock";
+    out.shared_account_hash = normalizeAccountHash(out.shared_account_hash);
+    out.plan_tier =
+      out.plan_tier === "pro" || out.plan_tier === "ultra" ? out.plan_tier : "auto";
+    out.has_separate_argon_pool = Boolean(out.has_separate_argon_pool);
     return out;
   }
 
@@ -243,6 +315,39 @@ export class LedgerStore {
     }
     if ("usage_rule_note" in normalized) {
       normalized.usage_rule_note = sanitizeUsageRuleNote(normalized.usage_rule_note);
+    }
+    if ("account_isolation_mode" in normalized) {
+      normalized.account_isolation_mode =
+        normalized.account_isolation_mode === "shared_owner_account" ? "shared_owner_account" : "per_member_lock";
+    }
+    if (patch?.lockOwnerAccount === true) {
+      const ownerRow = await this.db.first(
+        "SELECT bound_account_hash FROM members WHERE role = 'owner' AND status = 'active' ORDER BY created_at ASC LIMIT 1"
+      );
+      const ownerHash = normalizeAccountHash(ownerRow?.bound_account_hash || "");
+      if (!ownerHash) {
+        throw new Error("组长插件尚未同步到当前账号指纹，请先打开 Antigravity 侧边栏同步一次后再锁定");
+      }
+      normalized.shared_account_hash = ownerHash;
+    }
+    if ("shared_account_hash" in normalized) {
+      const rawHash = String(normalized.shared_account_hash || "").trim();
+      if (!rawHash) {
+        normalized.shared_account_hash = "";
+      } else {
+        const cleanHash = normalizeAccountHash(rawHash);
+        if (!cleanHash) {
+          throw new Error("共享账号指纹格式不正确（需为 20 位十六进制短指纹，严禁提交明文邮箱）");
+        }
+        normalized.shared_account_hash = cleanHash;
+      }
+    }
+    if ("plan_tier" in normalized) {
+      normalized.plan_tier =
+        normalized.plan_tier === "pro" || normalized.plan_tier === "ultra" ? normalized.plan_tier : "auto";
+    }
+    if ("has_separate_argon_pool" in normalized) {
+      normalized.has_separate_argon_pool = Boolean(normalized.has_separate_argon_pool);
     }
 
     const nowMs = this.nowFn();
@@ -363,6 +468,8 @@ export class LedgerStore {
     initialBalanceFen = 0,
     lowBalanceFen = 200,
     note = "",
+    boundAccountHash = "",
+    boundAccountLockedByAdmin = undefined,
   } = {}) {
     const cleanName = String(name || "").trim();
     if (!cleanName) throw new Error("成员名称不能为空");
@@ -372,13 +479,22 @@ export class LedgerStore {
     const nowIso = new Date(this.nowFn()).toISOString();
     const initFen = Math.round(Number(initialBalanceFen) || 0);
     const lowFen = Math.max(0, Math.round(Number(lowBalanceFen) || 200));
+    const rawHash = String(boundAccountHash || "").trim();
+    let cleanHash = "";
+    if (rawHash) {
+      cleanHash = normalizeAccountHash(rawHash);
+      if (!cleanHash) {
+        throw new Error("成员预锁账号指纹格式不正确（需为 20 位十六进制短指纹，严禁提交明文邮箱）");
+      }
+    }
+    const lockedByAdmin = cleanHash ? (boundAccountLockedByAdmin === false ? 0 : 1) : 0;
     const settings = await this.getSettings();
     const ruleVer = Math.max(1, Number(settings.rule_version) || 1);
 
     await this.db.run(
-      `INSERT INTO members (id, name, role, member_token, balance_fen, low_balance_fen, status, accepted_rule_version, note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-      [memberId, cleanName, cleanRole, memberToken, initFen, lowFen, ruleVer, String(note || "").trim(), nowIso, nowIso]
+      `INSERT INTO members (id, name, role, member_token, balance_fen, low_balance_fen, status, accepted_rule_version, bound_account_hash, bound_account_locked_by_admin, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+      [memberId, cleanName, cleanRole, memberToken, initFen, lowFen, ruleVer, cleanHash, lockedByAdmin, String(note || "").trim(), nowIso, nowIso]
     );
 
     if (initFen !== 0) {
@@ -410,13 +526,36 @@ export class LedgerStore {
         : cur.low_balance_fen;
     const nextNote = patch.note !== undefined ? String(patch.note).trim() : cur.note;
     const nextToken = patch.rotateToken ? `agf_${randomHex(16)}` : cur.member_token;
+
+    let nextBoundHash = normalizeAccountHash(cur.bound_account_hash || "");
+    let nextLockedByAdmin = Number(cur.bound_account_locked_by_admin || 0) === 1 ? 1 : 0;
+    if (patch.clearAccountLock === true) {
+      nextBoundHash = "";
+      nextLockedByAdmin = 0;
+    } else if (patch.boundAccountHash !== undefined) {
+      const rawHash = String(patch.boundAccountHash || "").trim();
+      if (!rawHash) {
+        nextBoundHash = "";
+        nextLockedByAdmin = 0;
+      } else {
+        const cleanHash = normalizeAccountHash(rawHash);
+        if (!cleanHash) {
+          throw new Error("成员账号指纹格式不正确（需为 20 位十六进制短指纹，严禁提交明文邮箱）");
+        }
+        nextBoundHash = cleanHash;
+        nextLockedByAdmin = patch.boundAccountLockedByAdmin === false ? 0 : 1;
+      }
+    } else if (patch.boundAccountLockedByAdmin !== undefined) {
+      nextLockedByAdmin = patch.boundAccountLockedByAdmin && nextBoundHash ? 1 : 0;
+    }
+
     const nowIso = new Date(this.nowFn()).toISOString();
 
     await this.db.run(
       `UPDATE members
-         SET name = ?, role = ?, status = ?, low_balance_fen = ?, note = ?, member_token = ?, updated_at = ?
+         SET name = ?, role = ?, status = ?, low_balance_fen = ?, note = ?, member_token = ?, bound_account_hash = ?, bound_account_locked_by_admin = ?, updated_at = ?
        WHERE id = ?`,
-      [nextName, nextRole, nextStatus, nextLow, nextNote, nextToken, nowIso, memberId]
+      [nextName, nextRole, nextStatus, nextLow, nextNote, nextToken, nextBoundHash, nextLockedByAdmin, nowIso, memberId]
     );
     return await this.db.first("SELECT * FROM members WHERE id = ?", [memberId]);
   }
@@ -519,12 +658,17 @@ export class LedgerStore {
     const nowIso = new Date(nowMs).toISOString();
 
     await this.db.run(
-      "UPDATE members SET accepted_rule_version = ?, updated_at = ? WHERE id = ?",
+      "UPDATE members SET accepted_rule_version = MAX(COALESCE(accepted_rule_version, 1), ?), updated_at = ? WHERE id = ?",
       [targetVer, nowIso, member.id]
     );
+    const updatedRow = await this.db.first(
+      "SELECT COALESCE(accepted_rule_version, 1) AS ver FROM members WHERE id = ?",
+      [member.id]
+    );
+    const finalVer = Math.max(1, Number(updatedRow?.ver || targetVer));
 
     const selfView = await this.getMemberSelfView(member.id, nowMs);
-    return { ok: true, acceptedRuleVersion: targetVer, member: selfView };
+    return { ok: true, acceptedRuleVersion: finalVer, member: selfView };
   }
 
   async getLatestPoolSnapshots() {
@@ -565,6 +709,15 @@ export class LedgerStore {
     }
   }
 
+  async resolveEffectivePlanTier(settings) {
+    const raw = String(settings?.plan_tier || "auto").toLowerCase();
+    if (raw === "pro" || raw === "ultra") return raw;
+    const ownerRow = await this.db.first(
+      "SELECT account_tier FROM members WHERE role = 'owner' AND status = 'active' ORDER BY created_at ASC LIMIT 1"
+    );
+    return normalizeAccountTier(ownerRow?.account_tier || "");
+  }
+
   async settleWeeklyDrop({
     poolKey,
     snapshotId,
@@ -582,6 +735,7 @@ export class LedgerStore {
     const unsettledRows = await this.db.all(
       `SELECT u.id, u.member_id AS memberId, m.role AS role,
               COALESCE(m.accepted_rule_version, 1) AS acceptedRuleVersion,
+              u.model_name AS modelName,
               u.weighted_units AS weightedUnits, u.event_ts_ms AS eventTsMs, u.slice_start_ms AS sliceStartMs
          FROM usage_reports u
          JOIN members m ON m.id = u.member_id
@@ -600,9 +754,13 @@ export class LedgerStore {
           })
         : unsettledRows;
 
+    const excludeSeparateArgon = poolKey === "gemini" && Boolean(settings?.has_separate_argon_pool);
     const byMember = new Map();
     const consumedIds = [];
     for (const r of eligibleRows) {
+      if (excludeSeparateArgon && isArgonModel(r.modelName)) {
+        continue;
+      }
       consumedIds.push(r.id);
       const prev = byMember.get(r.memberId) || {
         memberId: r.memberId,
@@ -614,11 +772,13 @@ export class LedgerStore {
       byMember.set(r.memberId, prev);
     }
 
+    const effectivePlanTier = await this.resolveEffectivePlanTier(settings);
     const allocResult = allocateSliceUsage({
       poolKey,
       poolDropPct: dropPct,
       memberUsages: Array.from(byMember.values()),
       settings,
+      effectivePlanTier,
     });
 
     // 立即将本次已参与结算的 usage_reports 打标，彻底杜绝后续 90 秒心跳重复拉出旧记录多次计费
@@ -748,14 +908,73 @@ export class LedgerStore {
         : this.nowFn();
     const nowIso = new Date(nowMs).toISOString();
     const clientVer = String(payload.clientVersion || "1.2.0").slice(0, 32);
-
-    await this.db.run(
-      "UPDATE members SET last_seen_at = ?, last_client_version = ?, updated_at = ? WHERE id = ?",
-      [nowIso, clientVer, nowIso, member.id]
-    );
+    const accountHash = normalizeAccountHash(payload.accountHash || "");
+    const accountTier = normalizeAccountTier(payload.accountTier || "");
+    const deviceId = sanitizeDeviceId(payload.deviceId || "");
+    const collectionStatus = normalizeCollectionStatus(payload.collectionStatus || "active");
+    const rebindAccount = Boolean(payload.rebindAccount);
+    const hasSeparateArgonPool =
+      typeof payload.hasSeparateArgonPool === "boolean" ? payload.hasSeparateArgonPool : null;
 
     const settings = await this.getSettings();
+    const isSharedMode =
+      settings.account_isolation_mode === "shared_owner_account" &&
+      Boolean(settings.shared_account_hash);
+    const existingBoundHash = normalizeAccountHash(member.bound_account_hash || "");
+    const lockedByAdmin = Number(member.bound_account_locked_by_admin || 0) === 1;
+
+    let nextBoundHash = existingBoundHash;
+    if (!isSharedMode && accountHash) {
+      if (!existingBoundHash && collectionStatus === "active") {
+        nextBoundHash = accountHash;
+      } else if (rebindAccount && !lockedByAdmin) {
+        nextBoundHash = accountHash;
+      }
+    }
+
+    const accountMatchesForEvents = (() => {
+      if (collectionStatus !== "active") return false;
+      if (isSharedMode) return Boolean(accountHash && accountHash === settings.shared_account_hash);
+      if (lockedByAdmin && nextBoundHash) return Boolean(accountHash && accountHash === nextBoundHash);
+      if (nextBoundHash && accountHash) return accountHash === nextBoundHash;
+      return true;
+    })();
+
+    const nextAccountTier =
+      accountTier && accountMatchesForEvents
+        ? accountTier
+        : normalizeAccountTier(member.account_tier || "");
+
+    const nextDevicesJson = deviceId
+      ? mergeMemberDevices(
+          member.devices_json || "{}",
+          deviceId,
+          {
+            lastSeenAt: nowIso,
+            lastSeenMs: nowMs,
+            clientVersion: clientVer,
+            collectionStatus,
+            ...(accountTier ? { accountTier } : {}),
+          },
+          nowMs
+        )
+      : String(member.devices_json || "{}");
+
+    await this.db.run(
+      `UPDATE members
+          SET last_seen_at = ?,
+              last_client_version = ?,
+              bound_account_hash = ?,
+              account_tier = ?,
+              collection_status = ?,
+              devices_json = ?,
+              updated_at = ?
+        WHERE id = ?`,
+      [nowIso, clientVer, nextBoundHash, nextAccountTier, collectionStatus, nextDevicesJson, nowIso, member.id]
+    );
+
     let acceptedEvents = 0;
+    let ignoredEvents = 0;
     let accepted3pRequests = 0;
     const MAX_SINGLE_EVENT_TOKENS = 20_000_000;
 
@@ -765,36 +984,40 @@ export class LedgerStore {
           (id, member_id, slice_start_ms, event_ts_ms, pool_key, model_name, request_count, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, weighted_units, settled_snapshot_id, reported_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`;
     const pendingStmts = [];
-    for (const ev of events.slice(0, 500)) {
-      if (!ev || typeof ev !== "object") continue;
-      const evId = String(ev.id || "").trim().slice(0, 96);
-      if (!evId) continue;
-      const modelName = String(ev.modelName || ev.model || "").slice(0, 80);
-      const poolKey = ev.poolKey === "3p" || ev.poolKey === "gemini" ? ev.poolKey : classifyModelPool(modelName);
-      const rawTs = Number(ev.timestampMs);
-      const tsMs = Number.isFinite(rawTs)
-        ? Math.min(nowMs + 2 * 60 * 1000, Math.max(nowMs - 7 * 24 * 3600 * 1000, rawTs))
-        : nowMs;
-      const sliceStartMs = alignSliceStartMs(tsMs);
-      const uncached = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.uncachedInputTokens) || 0)));
-      const cacheRead = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.cacheReadTokens) || 0)));
-      const cacheWrite = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.cacheWriteTokens) || 0)));
-      const output = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.outputTokens) || 0)));
-      const reqCount = Math.min(100, Math.max(1, Math.round(Number(ev.requestCount) || 1)));
-      const weighted = computeWeightedUnits({
-        modelName,
-        uncachedInputTokens: uncached,
-        cacheReadTokens: cacheRead,
-        cacheWriteTokens: cacheWrite,
-        outputTokens: output,
-      });
-      const fullId = `${member.id}:${evId}`;
-      pendingStmts.push({
-        sql: insertSql,
-        poolKey,
-        reqCount,
-        params: [fullId, member.id, sliceStartMs, Math.round(tsMs), poolKey, modelName, reqCount, uncached, cacheRead, cacheWrite, output, weighted, nowIso],
-      });
+    if (!accountMatchesForEvents) {
+      ignoredEvents = events.length;
+    } else {
+      for (const ev of events.slice(0, 500)) {
+        if (!ev || typeof ev !== "object") continue;
+        const evId = String(ev.id || "").trim().slice(0, 96);
+        if (!evId) continue;
+        const modelName = String(ev.modelName || ev.model || "").slice(0, 80);
+        const poolKey = ev.poolKey === "3p" || ev.poolKey === "gemini" ? ev.poolKey : classifyModelPool(modelName);
+        const rawTs = Number(ev.timestampMs);
+        const tsMs = Number.isFinite(rawTs)
+          ? Math.min(nowMs + 2 * 60 * 1000, Math.max(nowMs - 7 * 24 * 3600 * 1000, rawTs))
+          : nowMs;
+        const sliceStartMs = alignSliceStartMs(tsMs);
+        const uncached = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.uncachedInputTokens) || 0)));
+        const cacheRead = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.cacheReadTokens) || 0)));
+        const cacheWrite = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.cacheWriteTokens) || 0)));
+        const output = Math.min(MAX_SINGLE_EVENT_TOKENS, Math.max(0, Math.round(Number(ev.outputTokens) || 0)));
+        const reqCount = Math.min(100, Math.max(1, Math.round(Number(ev.requestCount) || 1)));
+        const weighted = computeWeightedUnits({
+          modelName,
+          uncachedInputTokens: uncached,
+          cacheReadTokens: cacheRead,
+          cacheWriteTokens: cacheWrite,
+          outputTokens: output,
+        });
+        const fullId = `${member.id}:${evId}`;
+        pendingStmts.push({
+          sql: insertSql,
+          poolKey,
+          reqCount,
+          params: [fullId, member.id, sliceStartMs, Math.round(tsMs), poolKey, modelName, reqCount, uncached, cacheRead, cacheWrite, output, weighted, nowIso],
+        });
+      }
     }
 
     const BATCH_CHUNK = 50;
@@ -819,7 +1042,7 @@ export class LedgerStore {
       }
     }
 
-    // 2. 处理官方总池配额水位快照，并执行一次性增量分摊与未统计消耗检测
+    // 2. 处理官方总池配额水位快照，并执行三道防串号校验、一次性增量分摊与未统计消耗检测
     const authority = settings.quota_snapshot_authority === "all_members" ? "all_members" : "owner_only";
     const canReportQuota = member.role === "owner" || authority === "all_members";
     const snapshots = Array.isArray(payload.quotaSnapshots) ? payload.quotaSnapshots : [];
@@ -840,9 +1063,34 @@ export class LedgerStore {
       if (pvAlert) newAlerts.push(pvAlert);
     }
 
-    if (!canReportQuota) {
+    const everUpgradedTo160 =
+      isVersionAtLeast(member.last_client_version, 1, 6) || isVersionAtLeast(clientVer, 1, 6);
+    let quotaFingerprintAllowed = true;
+    if (collectionStatus !== "active") {
+      quotaFingerprintAllowed = false;
+    } else if (isSharedMode && accountHash !== settings.shared_account_hash) {
+      quotaFingerprintAllowed = false;
+    } else if (nextBoundHash && accountHash !== nextBoundHash) {
+      quotaFingerprintAllowed = false;
+    } else if (!nextBoundHash && everUpgradedTo160 && !accountHash) {
+      quotaFingerprintAllowed = false;
+    }
+
+    if (!canReportQuota || !quotaFingerprintAllowed) {
       ignoredQuotaSnapshots = snapshots.length;
     } else {
+      if (
+        snapshots.length > 0 &&
+        hasSeparateArgonPool !== null &&
+        hasSeparateArgonPool !== Boolean(settings.has_separate_argon_pool)
+      ) {
+        settings.has_separate_argon_pool = hasSeparateArgonPool;
+        await this.db.run(
+          "INSERT INTO settings (key, value, updated_at) VALUES ('has_separate_argon_pool', ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+          [JSON.stringify(hasSeparateArgonPool), nowIso]
+        );
+      }
+
       for (const snap of snapshots) {
         if (!snap || typeof snap !== "object") continue;
         const poolKey = snap.poolKey === "3p" ? "3p" : snap.poolKey === "gemini" ? "gemini" : "";
@@ -867,9 +1115,9 @@ export class LedgerStore {
         if (prev && capturedAtMs < Number(prev.captured_at_ms)) continue;
 
         const insSnap = await this.db.run(
-          `INSERT INTO pool_snapshots (pool_key, window_key, remaining_pct, reset_at, reporter_member_id, captured_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [poolKey, windowKey, Math.round(pct * 1000) / 1000, resetAt, member.id, capturedAtMs]
+          `INSERT INTO pool_snapshots (pool_key, window_key, remaining_pct, reset_at, reporter_member_id, captured_at_ms, account_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [poolKey, windowKey, Math.round(pct * 1000) / 1000, resetAt, member.id, capturedAtMs, accountHash]
         );
         let snapshotId = Number(insSnap?.lastInsertRowid ?? insSnap?.meta?.last_row_id ?? 0);
         if (!snapshotId) {
@@ -882,7 +1130,28 @@ export class LedgerStore {
 
         if (windowKey === "weekly" && prev) {
           const delta = evaluateQuotaDelta(prev.remaining_pct, pct, prev.reset_at, resetAt);
+          if (delta.isAnchorSwitch) {
+            // 第三道防线：重置时间大幅倒退（>6h）视为跨号/跨周期锚点切换，仅更新水位锚点，绝不误判重置或扣费
+            continue;
+          }
           if (delta.isReset) {
+            // 跨周重置秒级边界封账：将重置分界点前的旧周未结算记录标记为 -snapshotId，绝不漏入新周扣费
+            const prevResetMs = prev.reset_at ? Date.parse(prev.reset_at) : NaN;
+            const resetBoundaryMs =
+              Number.isFinite(prevResetMs) && prevResetMs <= capturedAtMs
+                ? prevResetMs
+                : Number(prev.captured_at_ms);
+            if (snapshotId > 0 && Number.isFinite(resetBoundaryMs) && resetBoundaryMs > 0) {
+              await this.db.run(
+                `UPDATE usage_reports
+                    SET settled_snapshot_id = ?
+                  WHERE pool_key = ?
+                    AND settled_snapshot_id IS NULL
+                    AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) < ?`,
+                [-snapshotId, poolKey, resetBoundaryMs]
+              );
+            }
+
             // 新周期开启时清空上一周期残留的异常缺口缓冲
             const buf = await this.loadBlackholeBuffer();
             if (Array.isArray(buf[poolKey]) && buf[poolKey].length > 0) {
@@ -905,7 +1174,6 @@ export class LedgerStore {
 
             // 跨重置边界离线补算：若重置后、组长开机前新周期已有真实消耗（100 - pct），将其准确结算到新周期
             if (delta.postResetDropPct > 0 && snapshotId > 0) {
-              const prevResetMs = prev.reset_at ? Date.parse(prev.reset_at) : NaN;
               const minPostResetTs = Number.isFinite(prevResetMs)
                 ? Math.max(Number(prev.captured_at_ms), prevResetMs)
                 : Number(prev.captured_at_ms);
@@ -939,7 +1207,7 @@ export class LedgerStore {
               dropPct: delta.dropPct,
               fromSliceMs: fromSlice,
               toSliceMs: toSlice,
-              minEventTsMs: 0,
+              minEventTsMs: Number(prev.captured_at_ms),
               resetAt: resetAt || prev.reset_at || "",
               capturedAtMs,
               nowMs,
@@ -958,6 +1226,7 @@ export class LedgerStore {
     return {
       ok: true,
       acceptedEvents,
+      ignoredEvents,
       ignoredQuotaSnapshots,
       newAlertsCount: newAlerts.length,
       member: selfView,
@@ -1027,7 +1296,14 @@ export class LedgerStore {
 
   async getMemberSelfView(memberId, nowMs = this.nowFn()) {
     const member = await this.db.first(
-      "SELECT id, name, role, balance_fen, low_balance_fen, status, COALESCE(accepted_rule_version, 1) AS accepted_rule_version, last_seen_at FROM members WHERE id = ?",
+      `SELECT id, name, role, balance_fen, low_balance_fen, status,
+              COALESCE(accepted_rule_version, 1) AS accepted_rule_version,
+              COALESCE(bound_account_hash, '') AS bound_account_hash,
+              COALESCE(bound_account_locked_by_admin, 0) AS bound_account_locked_by_admin,
+              COALESCE(account_tier, '') AS account_tier,
+              COALESCE(collection_status, 'active') AS collection_status,
+              last_seen_at
+         FROM members WHERE id = ?`,
       [memberId]
     );
     if (!member) throw new Error("未找到成员");
@@ -1155,7 +1431,7 @@ export class LedgerStore {
     if (showPeerShares) {
       const offlineGraceMs = Math.max(3, Number(settings.offline_grace_minutes) || 12) * 60 * 1000;
       const peerMembers = await this.db.all(
-        "SELECT id, name, role, last_seen_at FROM members WHERE status = 'active' ORDER BY CASE WHEN role = 'owner' THEN 0 ELSE 1 END, created_at ASC"
+        "SELECT id, name, role, last_seen_at, COALESCE(collection_status, 'active') AS collection_status FROM members WHERE status = 'active' ORDER BY CASE WHEN role = 'owner' THEN 0 ELSE 1 END, created_at ASC"
       );
       const peerAllocs = await this.db.all(
         `SELECT member_id, pool_key, SUM(attributed_pct) AS total_pct
@@ -1190,6 +1466,7 @@ export class LedgerStore {
           role: pm.role,
           isSelf,
           online: Boolean(seenMs && nowMs - seenMs <= offlineGraceMs),
+          collectionStatus: normalizeCollectionStatus(pm.collection_status || "active"),
           geminiPct: w.geminiPct,
           thirdPartyPct: w.thirdPartyPct,
           recent5hGeminiShare: h5.geminiSharePct,
@@ -1200,6 +1477,7 @@ export class LedgerStore {
       });
     }
 
+    const effectivePlanTier = await this.resolveEffectivePlanTier(settings);
     return {
       id: member.id,
       name: member.name,
@@ -1212,6 +1490,14 @@ export class LedgerStore {
       isLowBalance: isPrepaid && member.role !== "owner" && Number(member.balance_fen || 0) <= Number(member.low_balance_fen || 0),
       isDepleted: isPrepaid && member.role !== "owner" && Number(member.balance_fen || 0) <= 0,
       lastSeenAt: member.last_seen_at || null,
+      accountLock: {
+        isolationMode: settings.account_isolation_mode === "shared_owner_account" ? "shared_owner_account" : "per_member_lock",
+        sharedAccountHash: normalizeAccountHash(settings.shared_account_hash || ""),
+        boundAccountHash: normalizeAccountHash(member.bound_account_hash || ""),
+        lockedByAdmin: Number(member.bound_account_locked_by_admin || 0) === 1,
+        accountTier: normalizeAccountTier(member.account_tier || ""),
+        collectionStatus: normalizeCollectionStatus(member.collection_status || "active"),
+      },
       weekBuckets,
       weekSummary,
       recent5h: my5h,
@@ -1237,6 +1523,9 @@ export class LedgerStore {
         broadcastBlackholeToMembers: broadcastBlackhole,
         usageRuleNote: usageRules.usageRuleNote,
         usageRuleNoteHash: usageRules.usageRuleNoteHash,
+        planTier: settings.plan_tier,
+        effectivePlanTier,
+        hasSeparateArgonPool: Boolean(settings.has_separate_argon_pool),
         summaryText: formatPricingRuleSummary(settings),
         calibrationDryRun: !isPrepaid,
       },
@@ -1340,6 +1629,10 @@ export class LedgerStore {
         m.status === "active" &&
         m.role !== "owner" &&
         (week.thirdPartyPct > 0 || (p3ReqAdminMap.get(m.id) || 0) > 0);
+      const devices = formatDevicesList(m.devices_json || "{}", nowMs, offlineGraceMs);
+      const onlineDeviceCount = devices.filter((d) => d.online).length;
+      const lastVer = String(m.last_client_version || "").trim();
+      const isLegacyClient = Boolean(lastVer && !isVersionAtLeast(lastVer, 1, 6));
       return {
         id: m.id,
         name: m.name,
@@ -1351,13 +1644,20 @@ export class LedgerStore {
         status: m.status,
         acceptedRuleVersion: acceptedVer,
         needsRuleConfirm: m.status === "active" && m.role !== "owner" && acceptedVer < currentRuleVersion,
+        boundAccountHash: normalizeAccountHash(m.bound_account_hash || ""),
+        boundAccountLockedByAdmin: Number(m.bound_account_locked_by_admin || 0) === 1,
+        accountTier: normalizeAccountTier(m.account_tier || ""),
+        collectionStatus: normalizeCollectionStatus(m.collection_status || "active"),
+        devices,
+        onlineDeviceCount,
+        isLegacyClient,
         capReached,
         capApproaching,
         poolViolated,
         note: m.note || "",
         online,
         lastSeenAt: m.last_seen_at || null,
-        lastClientVersion: m.last_client_version || "",
+        lastClientVersion: lastVer,
         week,
         recent5h: h5,
         requests7d: r7.requests7d,
@@ -1365,6 +1665,12 @@ export class LedgerStore {
         createdAt: m.created_at,
       };
     });
+
+    const ownerMember = members.find((m) => m.role === "owner" && m.status === "active") || members[0] || null;
+    const effectivePlanTier =
+      settings.plan_tier === "pro" || settings.plan_tier === "ultra"
+        ? settings.plan_tier
+        : ownerMember?.accountTier || "";
 
     const recentAllocations = await this.db.all(
       `SELECT a.*, m.name AS member_name
@@ -1424,6 +1730,9 @@ export class LedgerStore {
         totalWeekChargeFen,
         totalWeekGeminiPct,
         totalWeekThirdPartyPct,
+        effectivePlanTier,
+        ownerBoundAccountHash: ownerMember?.boundAccountHash || "",
+        ownerAccountTier: ownerMember?.accountTier || "",
       },
       members,
       recentAllocations,

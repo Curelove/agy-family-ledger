@@ -46,8 +46,170 @@
   .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; flex-shrink: 0; }
   .dot.ok { background: var(--ok); }
+  .dot.pine { background: var(--pine); }
   .dot.warn { background: var(--amber); }
   .dot.err { background: var(--vermilion); }
+
+  .acct-guard-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 7px 10px;
+    margin-bottom: 11px;
+    font-size: 12px;
+  }
+  .acct-guard-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+  .acct-guard-label {
+    color: var(--muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .acct-guard-email {
+    color: var(--ink);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .acct-tier-pill {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 99px;
+    background: var(--pine-soft);
+    color: var(--pine);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .acct-btn-soft {
+    padding: 3px 9px;
+    font-size: 12px;
+    background: var(--paper);
+    border-color: var(--border);
+    color: var(--ink-soft);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .acct-btn-soft:hover { background: var(--well); color: var(--ink); }
+
+  .acct-guard-card {
+    border-radius: 11px;
+    padding: 11px 12px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .acct-guard-card.is-mismatch {
+    background: #EBF4F1;
+    border-color: #BDD9D3;
+    border-left-color: var(--pine);
+    color: #1F4E47;
+  }
+  .acct-guard-card.is-manual {
+    background: #FBF3E5;
+    border-color: #E4C69B;
+    border-left-color: var(--amber);
+    color: #5E3A14;
+  }
+  .acct-guard-card.is-identity-lost {
+    background: #F8F1E7;
+    border-color: #DFC8A8;
+    border-left-color: #9A6B38;
+    color: #553A1E;
+  }
+  .acct-guard-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 5px;
+  }
+  .acct-guard-card-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+    min-width: 0;
+  }
+  #acct-card-ico {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .acct-guard-card.is-mismatch .acct-guard-card-title { color: #143B35; }
+  .acct-guard-card.is-manual .acct-guard-card-title { color: #53310D; }
+  .acct-guard-card-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 99px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .acct-guard-card.is-mismatch .acct-guard-card-badge { background: var(--pine); color: #FFFDF9; }
+  .acct-guard-card.is-manual .acct-guard-card-badge { background: var(--amber); color: #FFFDF9; }
+  .acct-guard-card.is-identity-lost .acct-guard-card-badge { background: #8E6334; color: #FFFDF9; }
+  .acct-guard-card-body { font-size: 12px; line-height: 1.55; }
+  .acct-guard-actions {
+    margin-top: 9px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    align-items: center;
+  }
+  .acct-guard-actions button.pine-btn {
+    background: var(--pine);
+    border-color: var(--pine);
+    color: #FFFDF9;
+  }
+  .acct-guard-actions button.pine-btn:hover { background: #22544E; }
+  .acct-guard-actions button.amber-btn {
+    background: var(--amber);
+    border-color: var(--amber);
+    color: #FFFDF9;
+  }
+  .acct-guard-actions button.amber-btn:hover { background: #9C5F2B; }
+  .rebind-box {
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(45, 106, 98, 0.28);
+  }
+  .rebind-link-btn {
+    padding: 2px 0;
+    background: transparent !important;
+    border-color: transparent !important;
+    color: var(--pine);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .rebind-link-btn:hover { color: #19443E; }
+  .rebind-confirm-panel {
+    margin-top: 6px;
+    padding: 8px 9px;
+    border-radius: 8px;
+    background: rgba(255, 253, 249, 0.85);
+    border: 1px solid #C6DFD9;
+    font-size: 12px;
+    color: #1F4E47;
+  }
 
   button {
     appearance: none !important; -webkit-appearance: none !important;
@@ -596,6 +758,40 @@
     </div>
   </div>
 
+  <!-- 本机多账号守卫状态条（正常匹配态 · 单行紧凑） -->
+  <div class="acct-guard-bar" id="acct-guard-bar" hidden>
+    <div class="acct-guard-left">
+      <span class="dot ok" id="acct-bar-dot"></span>
+      <span class="acct-guard-label" id="acct-bar-label">统计账号：</span>
+      <span class="acct-guard-email" id="acct-bar-email">--</span>
+      <span class="acct-tier-pill" id="acct-bar-tier" hidden>Ultra</span>
+    </div>
+    <button type="button" class="acct-btn-soft" id="btn-manual-pause" title="暂停本机统计，暂停期间对话不会计入家庭组">暂停统计</button>
+  </div>
+
+  <!-- 本机多账号守卫柔和状态卡（切至个人号自动暂停 / 手动暂停 / 本地状态接口未连通） -->
+  <section class="acct-guard-card" id="acct-guard-card" hidden>
+    <div class="acct-guard-card-head">
+      <div class="acct-guard-card-title">
+        <span id="acct-card-ico"></span>
+        <span id="acct-card-title">--</span>
+      </div>
+      <span class="acct-guard-card-badge" id="acct-card-badge">已暂停</span>
+    </div>
+    <div class="acct-guard-card-body" id="acct-card-body"></div>
+    <div class="acct-guard-actions" id="acct-card-actions" hidden></div>
+    <div class="rebind-box" id="acct-rebind-box" hidden>
+      <button type="button" class="rebind-link-btn" id="btn-open-rebind">将当前账号改设为我的家庭组账号</button>
+      <div class="rebind-confirm-panel" id="rebind-confirm-panel" hidden>
+        <div id="rebind-confirm-text">切换后将清空本机暂存队列，从此刻起统计当前登录账号，绝不翻旧账。</div>
+        <div class="acct-guard-actions" style="margin-top:7px;">
+          <button type="button" class="pine-btn" id="btn-confirm-rebind">确认切换（从此刻起算）</button>
+          <button type="button" id="btn-cancel-rebind">取消</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- 规则、使用约定或单价变动确认提醒（防组长静默修改） -->
   <section class="rule-alert-card" id="rule-change-card" hidden>
     <div class="rule-alert-title" id="rule-alert-title">看板规则已更新，需要你确认</div>
@@ -811,7 +1007,7 @@
 
   <div class="privacy-note">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
-    <span>数据说明：插件仅上报本地对话步骤的纯数字 Token 计数、模型名、时间戳、在线心跳与官方剩余配额百分比，不读取任何代码、对话正文、思考过程或本机进程。</span>
+    <span>数据说明：插件仅上报本地对话步骤的纯数字 Token 计数、模型名、时间戳、不可逆账号短指纹与官方剩余配额百分比；明文邮箱仅在内存完成哈希与脱敏，绝不落盘或上传，也不读取任何代码、对话正文、思考过程或本机进程。</span>
   </div>
 </div>
 
@@ -835,7 +1031,7 @@ function postHeaders() {
 
 function renderUpdateUi(state) {
   const meta = state?.pluginMeta || {};
-  const curVer = String(meta.version || state?.clientVersion || "1.4.0");
+  const curVer = String(meta.version || state?.clientVersion || "1.6.0");
   const fallbackReleasesUrl = String(meta.releasesUrl || "https://github.com/Curelove/agy-family-ledger/releases");
   const autoCheck = state?.config?.autoCheckUpdates !== false;
 
@@ -1018,6 +1214,132 @@ function getSafeHostLabel(serverUrl) {
   }
 }
 
+const GUARD_ICONS = {
+  userSwitch:
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  pause:
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="10" y1="15" x2="10" y2="9"/><line x1="14" y1="15" x2="14" y2="9"/></svg>',
+  linkOff:
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/><line x1="2" y1="2" x2="22" y2="22"/></svg>',
+};
+
+function fmtTierLabel(tier) {
+  if (tier === "ultra") return "Ultra";
+  if (tier === "pro") return "Pro";
+  if (tier === "free") return "Free";
+  return "";
+}
+
+let rebindConfirmOpen = false;
+
+function renderAccountGuardUi(state) {
+  const bar = $("acct-guard-bar");
+  const card = $("acct-guard-card");
+  const configured = Boolean(state?.configured);
+  const blocked = state?.accountBlocked || null;
+  const ag = state?.accountGuard || {};
+  const cs = String(ag.collectionState || (configured ? "ACTIVE_MATCH" : "UNBOUND"));
+
+  if (!configured || blocked) {
+    bar.hidden = true;
+    card.hidden = true;
+    return;
+  }
+
+  if (cs === "PAUSED_ACCOUNT_MISMATCH") {
+    bar.hidden = true;
+    card.hidden = false;
+    card.className = "acct-guard-card is-mismatch";
+    $("acct-card-ico").innerHTML = GUARD_ICONS.userSwitch;
+    $("acct-card-title").textContent = "已自动暂停统计（当前为其他账号）";
+    $("acct-card-badge").textContent = "防串号暂停";
+
+    const curMasked = ag.currentAccountMasked || "";
+    const boundMasked = ag.boundAccountMasked || "";
+    const targetShort = ag.targetAccountHash ? "#" + ag.targetAccountHash.slice(0, 8) + "…" : "";
+    const boundDesc = boundMasked || (targetShort ? "指纹 " + targetShort : "家庭组账号");
+
+    if (ag.currentLoggedIn && curMasked) {
+      $("acct-card-body").textContent =
+        "检测到当前登录 " + curMasked + "，并非已锁定的家庭组账号（" + boundDesc + "）。你在当前账号下的对话与配额不会计入家庭组看板，下方仍可实时查看全组剩余额度；切回家庭组账号后将自动恢复。";
+    } else {
+      $("acct-card-body").textContent =
+        "当前未检测到已登录的 Antigravity 账号，已暂停家庭组统计（锁定目标：" + boundDesc + "）。重新登录家庭组账号后将自动恢复。";
+    }
+
+    const actionsEl = $("acct-card-actions");
+    actionsEl.hidden = true;
+    actionsEl.innerHTML = "";
+
+    const rebindBox = $("acct-rebind-box");
+    const canRebind = Boolean(ag.canSelfRebind);
+    rebindBox.hidden = !canRebind;
+    if (canRebind) {
+      $("rebind-confirm-panel").hidden = !rebindConfirmOpen;
+      $("rebind-confirm-text").textContent =
+        "确认将当前登录账号（" + (curMasked || "当前账号") + "）改设为你的家庭组统计账号吗？切换后将立即清空待传队列并从此刻起算，绝不混入此前对话。";
+    } else {
+      rebindConfirmOpen = false;
+      $("rebind-confirm-panel").hidden = true;
+    }
+    return;
+  }
+
+  if (cs === "PAUSED_MANUAL") {
+    bar.hidden = true;
+    card.hidden = false;
+    card.className = "acct-guard-card is-manual";
+    $("acct-card-ico").innerHTML = GUARD_ICONS.pause;
+    $("acct-card-title").textContent = "已手动暂停本机统计";
+    $("acct-card-badge").textContent = "手动暂停";
+    $("acct-card-body").textContent =
+      "暂停期间本机所有对话与水位均不会上传，你仍可正常查看全组剩余额度；点击下方按钮将从恢复那一刻起算，不会补扫暂停期间的历史记录。";
+    const actionsEl = $("acct-card-actions");
+    actionsEl.hidden = false;
+    actionsEl.innerHTML = '<button type="button" class="amber-btn" id="btn-resume-manual">恢复统计（从此刻起算）</button>';
+    $("acct-rebind-box").hidden = true;
+    rebindConfirmOpen = false;
+    return;
+  }
+
+  if (cs === "PAUSED_IDENTITY_UNAVAILABLE") {
+    bar.hidden = true;
+    card.hidden = false;
+    card.className = "acct-guard-card is-identity-lost";
+    $("acct-card-ico").innerHTML = GUARD_ICONS.linkOff;
+    $("acct-card-title").textContent = "暂未连上 Antigravity 本地状态接口";
+    $("acct-card-badge").textContent = "暂停防串号";
+    $("acct-card-body").textContent =
+      "已临时暂停本机采集与水位上报以防切号混账。若刚更新或重启过宿主，可在扩展页开关一次插件，或点击下方重试连接。";
+    const actionsEl = $("acct-card-actions");
+    actionsEl.hidden = false;
+    actionsEl.innerHTML = '<button type="button" id="btn-retry-identity">重试连接</button>';
+    $("acct-rebind-box").hidden = true;
+    rebindConfirmOpen = false;
+    return;
+  }
+
+  // ACTIVE_MATCH：显示单行紧凑状态条 + 一键手动暂停按钮
+  card.hidden = true;
+  bar.hidden = false;
+  rebindConfirmOpen = false;
+  const shownMasked = ag.currentAccountMasked || ag.boundAccountMasked || "";
+  const tierLabel = fmtTierLabel(ag.currentAccountTier || state?.memberView?.accountLock?.accountTier || "");
+  if (shownMasked) {
+    $("acct-bar-dot").className = "dot ok";
+    $("acct-bar-label").textContent = "统计账号：";
+    $("acct-bar-email").textContent = shownMasked;
+    $("acct-bar-email").title = shownMasked;
+    $("acct-bar-tier").hidden = !tierLabel;
+    if (tierLabel) $("acct-bar-tier").textContent = tierLabel;
+  } else {
+    $("acct-bar-dot").className = "dot";
+    $("acct-bar-label").textContent = "本机统计：";
+    $("acct-bar-email").textContent = ag.identityAvailable ? "等待识别登录账号" : "已开启（可手动启停）";
+    $("acct-bar-tier").hidden = true;
+  }
+}
+
 function renderSyncQueueUi(state) {
   const btn = $("btn-queue-detail");
   const textEl = $("queue-status-text");
@@ -1037,6 +1359,7 @@ function renderSyncQueueUi(state) {
   const hasErr = Boolean(state?.lastError);
   const intervalSec = Number(state?.config?.syncIntervalSec || 90);
   const hostLabel = getSafeHostLabel(state?.config?.serverUrl);
+  const colState = String(state?.accountGuard?.collectionState || "ACTIVE_MATCH");
 
   let cls = "is-ok";
   let label = "已全部同步";
@@ -1046,6 +1369,15 @@ function renderSyncQueueUi(state) {
   } else if (inFlight) {
     cls = "is-syncing";
     label = pending > 0 ? "正在同步 " + pending + " 条…" : "正在同步…";
+  } else if (colState === "PAUSED_ACCOUNT_MISMATCH") {
+    cls = "is-idle";
+    label = "切号已暂停";
+  } else if (colState === "PAUSED_MANUAL") {
+    cls = "is-pending";
+    label = "手动已暂停";
+  } else if (colState === "PAUSED_IDENTITY_UNAVAILABLE") {
+    cls = "is-pending";
+    label = "暂停防串号";
   } else if (blocked && pending > 0) {
     cls = "is-err";
     label = "已暂存 " + pending + " 条";
@@ -1147,6 +1479,7 @@ function render(state) {
     $("inp-proxy").value = state.config?.proxyUrl || "";
   }
 
+  const colState = String(state.accountGuard?.collectionState || "ACTIVE_MATCH");
   if (!state.configured) {
     dot.className = "dot warn";
     syncText.textContent = "等待粘贴绑定码";
@@ -1161,12 +1494,22 @@ function render(state) {
   } else if (state.lastError) {
     dot.className = "dot err";
     syncText.textContent = "同步暂未连通，记录已暂存本地";
+  } else if (colState === "PAUSED_ACCOUNT_MISMATCH") {
+    dot.className = "dot pine";
+    syncText.textContent = "当前为其他账号 · 本机统计已自动暂停";
+  } else if (colState === "PAUSED_MANUAL") {
+    dot.className = "dot warn";
+    syncText.textContent = "已手动暂停本机统计";
+  } else if (colState === "PAUSED_IDENTITY_UNAVAILABLE") {
+    dot.className = "dot warn";
+    syncText.textContent = "本地状态接口未连通 · 已暂停防串号";
   } else {
     dot.className = "dot ok";
     const t = state.lastSyncAt ? new Date(state.lastSyncAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "刚刚";
     syncText.textContent = "已同步 · " + t;
   }
 
+  renderAccountGuardUi(state);
   renderSyncQueueUi(state);
   $("cfg-status").textContent = state.configured ? "已连接 (" + state.config.tokenPreview + ")" : "未连接";
 
@@ -1755,6 +2098,76 @@ $("btn-save-invite").addEventListener("click", () => {
 $("btn-confirm-rules").addEventListener("click", handleConfirmRules);
 $("btn-unbind-reject").addEventListener("click", handleUnbind);
 $("btn-unbind-cfg").addEventListener("click", handleUnbind);
+
+async function setManualPause(paused) {
+  const res = await fetch("/api/pause-toggle", {
+    method: "POST",
+    headers: postHeaders(),
+    body: JSON.stringify({ paused: Boolean(paused) }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) {
+    $("banner-err").classList.add("show");
+    $("banner-err-text").textContent = data.error || "切换暂停状态失败";
+    return;
+  }
+  if (data.state) render(data.state);
+}
+
+$("btn-manual-pause").addEventListener("click", () => {
+  setManualPause(true);
+});
+
+$("acct-card-actions").addEventListener("click", async (e) => {
+  const resumeBtn = e.target.closest("#btn-resume-manual");
+  if (resumeBtn) {
+    resumeBtn.disabled = true;
+    try {
+      await setManualPause(false);
+    } finally {
+      resumeBtn.disabled = false;
+    }
+    return;
+  }
+  const retryBtn = e.target.closest("#btn-retry-identity");
+  if (retryBtn) {
+    retryBtn.disabled = true;
+    retryBtn.textContent = "正在重连…";
+    try {
+      const res = await fetch("/api/retry-identity", { method: "POST", headers: postHeaders(), body: "{}" });
+      const data = await res.json().catch(() => ({}));
+      if (data.state) render(data.state);
+    } finally {
+      retryBtn.disabled = false;
+    }
+  }
+});
+
+$("btn-open-rebind").addEventListener("click", () => {
+  rebindConfirmOpen = !rebindConfirmOpen;
+  if (latestStateCache) renderAccountGuardUi(latestStateCache);
+});
+$("btn-cancel-rebind").addEventListener("click", () => {
+  rebindConfirmOpen = false;
+  if (latestStateCache) renderAccountGuardUi(latestStateCache);
+});
+$("btn-confirm-rebind").addEventListener("click", async () => {
+  const btn = $("btn-confirm-rebind");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/rebind-account", { method: "POST", headers: postHeaders(), body: "{}" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      $("banner-err").classList.add("show");
+      $("banner-err-text").textContent = data.error || "换绑账号失败";
+      return;
+    }
+    rebindConfirmOpen = false;
+    if (data.state) render(data.state);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 loadState();
 setInterval(loadState, 30000);

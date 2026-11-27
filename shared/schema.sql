@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS members (
   low_balance_fen INTEGER NOT NULL DEFAULT 200,   -- 低余额提醒线（分）
   status TEXT NOT NULL DEFAULT 'active',          -- 'active' | 'paused' | 'archived'
   accepted_rule_version INTEGER NOT NULL DEFAULT 1, -- 成员最近一次确认同意的规则版本号
+  bound_account_hash TEXT NOT NULL DEFAULT '',    -- 成员锁定的 20 位账号指纹（空表示未锁）
+  bound_account_locked_by_admin INTEGER NOT NULL DEFAULT 0, -- 1 表示组长后台锁死，成员端不可自助换绑
+  account_tier TEXT NOT NULL DEFAULT '',          -- 最近上报的账号档位 ('ultra' | 'pro' | 'free' | '')
+  collection_status TEXT NOT NULL DEFAULT 'active', -- 'active' | 'paused_account_mismatch' | 'paused_manual' | 'paused_identity_unavailable'
+  devices_json TEXT NOT NULL DEFAULT '{}',        -- 匿名设备状态汇总（最多保留 6 台）
   note TEXT NOT NULL DEFAULT '',
   last_seen_at TEXT,
   last_client_version TEXT NOT NULL DEFAULT '',
@@ -51,7 +56,8 @@ CREATE TABLE IF NOT EXISTS pool_snapshots (
   remaining_pct REAL NOT NULL,                    -- 0.0 ~ 100.0
   reset_at TEXT,
   reporter_member_id TEXT NOT NULL,
-  captured_at_ms INTEGER NOT NULL
+  captured_at_ms INTEGER NOT NULL,
+  account_hash TEXT NOT NULL DEFAULT ''           -- 上报者账号 20 位短指纹（防串号追溯）
 );
 CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots (pool_key, window_key, captured_at_ms);
 

@@ -1,8 +1,6 @@
 /**
- * Antigravity 家庭组共享额度看板 · 全链路自动化端到端与安全回归验证 (v1.3.0)
- * 覆盖核心采集、真实 Antigravity Token 语义、防重复结算、防背锅上限、滚动黑洞检测、
- * 离线跨重置周期补算、本周期 week_bucket 过滤、绑定码规则锁定与变价确认、
- * 全组使用约定（保留底线 / 单人参考上限 / 组长适用范围 / 防暗改确认）、成员停用保账与安全校验。
+ * Antigravity 家庭组共享额度看板 · 全链路自动化端到端与红队安全回归验证 (v1.6.0)
+ * 覆盖原有 17 组核心测试 + 12 组 v1.6.0 多账号防串号/边界加固红队对抗测试（合计 29 组）。
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -10,16 +8,29 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { computeRuleNoteHash as engineNoteHash } from "../shared/billing-engine.mjs";
+import {
+  computeRuleNoteHash as engineNoteHash,
+  computeAccountFingerprint as engineAccountHash,
+  classifyModelPool as engineClassifyPool,
+  getModelMultiplier,
+  evaluateQuotaDelta,
+} from "../shared/billing-engine.mjs";
 import { LedgerStore, wrapNodeSqliteAdapter } from "../shared/ledger-store.mjs";
 import {
   extractNumericUsageFromLine,
   scanIncrementalTranscriptUsage,
+  getDefaultTranscriptRoots,
   parseQuotaSummaryResponse,
+  fetchLocalUserStatus,
   parseInviteCode,
   buildInviteCode,
   evaluateRuleMismatch,
   computeRuleNoteHash as collectorNoteHash,
+  computeAccountFingerprint as collectorAccountHash,
+  maskEmailForLocalDisplay,
+  classifyModelPool as collectorClassifyPool,
+  SidecarLease,
+  COLLECTION_STATES,
   MemberLedgerCollector,
 } from "../member-plugin/sidecars/ledger/collector.mjs";
 import {
@@ -151,7 +162,7 @@ try {
 
   // 3. 官方配额摘要解析
   await test("collector:parse-official-quota-summary-groups-and-buckets", async () => {
-    const snaps = parseQuotaSummaryResponse({
+    const parsed = parseQuotaSummaryResponse({
       groups: [
         {
           displayName: "Gemini",
@@ -166,6 +177,8 @@ try {
         },
       ],
     });
+    const snaps = parsed.snapshots;
+    assert.equal(parsed.hasSeparateArgonPool, false);
     assert.equal(snaps.length, 3);
     assert.equal(snaps.find((x) => x.poolKey === "gemini" && x.windowKey === "weekly").remainingPct, 74);
     assert.equal(snaps.find((x) => x.poolKey === "3p" && x.windowKey === "weekly").remainingPct, 91);
@@ -952,6 +965,1157 @@ try {
       assert.equal(syncRes.state.lastError, "", "暂停状态不得再套用「同步暂未送达」普通断网报错");
     } finally {
       srv.close();
+    }
+  });
+
+  // =========================================================================
+  // v1.6.0 新增 12 组红队对抗性回归测试（对应冻结规格书第七章）
+  // =========================================================================
+
+  function writeTranscriptStep(rootDir, convId, stepObj, mtimeMs = null) {
+    const logDir = path.join(rootDir, convId, ".system_generated", "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, "transcript.jsonl");
+    fs.appendFileSync(logPath, JSON.stringify(stepObj) + "\n", "utf8");
+    if (mtimeMs !== null) {
+      const sec = mtimeMs / 1000;
+      fs.utimesSync(logPath, sec, sec);
+    }
+    return logPath;
+  }
+
+  async function startLedgerHttpServer(ledgerStore, onRequest = null) {
+    const srv = http.createServer(async (req, res) => {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      const tok = req.headers["x-member-token"] || "";
+      if (onRequest) onRequest({ url: req.url, method: req.method, token: tok, body });
+      try {
+        let out;
+        if (req.url === "/api/member/heartbeat") out = await ledgerStore.ingestHeartbeat(tok, body);
+        else if (req.url === "/api/member/confirm-rules") out = await ledgerStore.confirmMemberRules(tok, body.ruleVersion);
+        else out = { ok: false, error: "not_found" };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(out));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { server: srv, port: srv.address().port };
+  }
+
+  // 18 (Red-Team #1). 切至 B 号自动暂停零入队 + 切回 A 号零翻旧账 + 恢复后新步正常采集
+  await test("multi-account:auto-pause-on-account-b-and-zero-backfill-on-return-to-a", async () => {
+    let t = Date.parse("2026-11-29T10:00:00Z");
+    const dbM = new DatabaseSync(":memory:");
+    const storeM = new LedgerStore(wrapNodeSqliteAdapter(dbM), { nowFn: () => t });
+    await storeM.ensureSchema(SCHEMA_SQL);
+    const mem = await storeM.createMember({ name: "多号成员甲" });
+
+    const receivedBodies = [];
+    const { server, port } = await startLedgerHttpServer(storeM, ({ body }) => receivedBodies.push(body));
+
+    const emailA = "family-member-a@gmail.com";
+    const emailB = "personal-secret-b@gmail.com";
+    const hashA = collectorAccountHash(emailA);
+    const hashB = collectorAccountHash(emailB);
+    let currentEmail = emailA;
+    let currentTier = "ultra";
+
+    try {
+      const workDir = fs.mkdtempSync(path.join(tmpDir, "rt-ma1-"));
+      const brainRoot = path.join(workDir, "brain");
+      fs.mkdirSync(brainRoot, { recursive: true });
+      const cfgPath = path.join(workDir, "config.json");
+      const stPath = path.join(workDir, "state.json");
+
+      const col = new MemberLedgerCollector({
+        configPath: cfgPath,
+        defaultConfigPath: path.join(workDir, "config.default.json"),
+        statePath: stPath,
+        transcriptRoots: [brainRoot],
+        nowFn: () => t,
+        fetchUserStatusImpl: async () => ({
+          ok: true,
+          statusCode: 200,
+          loggedIn: true,
+          accountHash: collectorAccountHash(currentEmail),
+          accountMasked: maskEmailForLocalDisplay(currentEmail),
+          accountTier: currentTier,
+        }),
+        fetchQuotaSnapshotsImpl: async () => ({
+          ok: true,
+          statusCode: 200,
+          hasSeparateArgonPool: false,
+          snapshots: [
+            { poolKey: "gemini", windowKey: "weekly", remainingPct: 88, resetAt: "2026-12-06T00:00:00Z", capturedAtMs: t },
+          ],
+        }),
+      });
+
+      col.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, memberToken: mem.member_token });
+      const initSync = await col.syncOnce();
+      assert.equal(initSync.ok, true);
+      assert.equal(initSync.state.accountGuard.collectionState, COLLECTION_STATES.ACTIVE_MATCH);
+      assert.equal(col.config.boundAccountHash, hashA);
+      assert.equal(col.config.boundAccountMasked, "fam***@gmail.com");
+
+      // 明文邮箱绝不落盘任何本地文件
+      const rawCfgDisk = fs.readFileSync(cfgPath, "utf8");
+      const rawStDisk = fs.readFileSync(stPath, "utf8");
+      assert.ok(!rawCfgDisk.includes(emailA) && !rawStDisk.includes(emailA), "明文完整邮箱严禁写入本地磁盘");
+
+      // A 号产生 1 条步骤 -> 正常入队并上传
+      t += 10_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-a-1",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "gemini-4-neon-xhigh",
+          created_at: new Date(t).toISOString(),
+          input_tokens: 15000,
+          output_tokens: 2000,
+        },
+        t
+      );
+      const sA1 = await col.syncOnce();
+      assert.equal(sA1.ok, true);
+      const cntA1 = await storeM.db.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [mem.id]);
+      assert.equal(Number(cntA1.cnt), 1, "A 号步骤应正常入库");
+
+      // 切换至个人号 B -> 12s 守卫立切 PAUSED_ACCOUNT_MISMATCH
+      currentEmail = emailB;
+      currentTier = "pro";
+      t += 12_000;
+      const gB1 = await col.tickAccountGuard();
+      assert.equal(gB1.state, COLLECTION_STATES.PAUSED_ACCOUNT_MISMATCH);
+
+      // B 号期间新建多个会话与追加步骤，多次运行守卫与同步 -> 0 入队、0 上报、0 水位，但 memberView 照常刷新
+      for (let i = 1; i <= 3; i++) {
+        t += 12_000;
+        writeTranscriptStep(
+          brainRoot,
+          `conv-b-${i}`,
+          {
+            step_index: i,
+            type: "PLANNER_RESPONSE",
+            status: "DONE",
+            model: "claude-opus-5-5-high",
+            created_at: new Date(t).toISOString(),
+            input_tokens: 90000,
+            outputTokens: 8000,
+            output_tokens: 8000,
+          },
+          t
+        );
+        await col.tickAccountGuard();
+        assert.equal(col.state.pendingEvents.length, 0, "切至 B 号期间 pendingEvents 必须始终为 0");
+      }
+      const sB = await col.syncOnce();
+      assert.equal(sB.ok, true, "切至 B 号仍应能正常拉取全组只读余量视图");
+      assert.ok(sB.state.memberView && sB.state.memberView.id === mem.id);
+      const lastWireB = receivedBodies[receivedBodies.length - 1];
+      assert.equal(lastWireB.usageEvents.length, 0, "B 号心跳严禁发送任何 usageEvents");
+      assert.equal(lastWireB.quotaSnapshots.length, 0, "B 号心跳严禁发送任何 quotaSnapshots");
+      assert.equal(lastWireB.collectionStatus, "paused_account_mismatch");
+      assert.ok(!JSON.stringify(lastWireB).includes(emailB), "上传载荷严禁包含明文邮箱");
+
+      // 在切回 A 号前 B 号再写一条尾随步骤（模拟未触发最后一次 12s 守卫前的残留尾）
+      t += 5_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-b-tail",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "gemini-4-carbon-high",
+          created_at: new Date(t).toISOString(),
+          input_tokens: 120000,
+          output_tokens: 9000,
+        },
+        t
+      );
+
+      // 切回家庭组账号 A -> 必须先锚定 EOF 消除全部 B 号余尾，0 翻旧账！
+      currentEmail = emailA;
+      currentTier = "ultra";
+      t += 10_000;
+      const gBackA = await col.tickAccountGuard();
+      assert.equal(gBackA.state, COLLECTION_STATES.ACTIVE_MATCH);
+      assert.equal(col.state.pendingEvents.length, 0, "切回 A 号瞬间必须先全盘锚定 EOF，绝不翻出 B 号任何旧账");
+
+      // 随后 A 号新增步骤 -> 正常采集并入库
+      t += 10_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-a-2",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "gemini-4-neon-xhigh",
+          created_at: new Date(t).toISOString(),
+          input_tokens: 22000,
+          output_tokens: 3000,
+        },
+        t
+      );
+      await col.syncOnce();
+      const cntFinal = await storeM.db.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [mem.id]);
+      assert.equal(Number(cntFinal.cnt), 2, "仅 A 号前后两条步骤入库，B 号所有会话彻底零混入");
+    } finally {
+      server.close();
+    }
+  });
+
+  // 19 (Red-Team #2). 组长切到个人 100% Pro 号绝不触发假重置、假扣费或假黑洞告警（客户端+服务端+引擎三道防线）
+  await test("multi-account:owner-switch-to-personal-100pct-never-triggers-false-reset-or-charge", async () => {
+    let t = Date.parse("2026-11-29T12:00:00Z");
+    const dbO = new DatabaseSync(":memory:");
+    const storeO = new LedgerStore(wrapNodeSqliteAdapter(dbO), { nowFn: () => t });
+    await storeO.ensureSchema(SCHEMA_SQL);
+    await storeO.updateSettings({ ledger_mode: "prepaid", gemini_fen_per_weekly_pct: 100 });
+    const d0 = await storeO.getAdminDashboard(t);
+    const own = d0.members.find((m) => m.role === "owner");
+    const mem = await storeO.createMember({ name: "组员子", initialBalanceFen: 2000 });
+
+    const hashA = collectorAccountHash("owner-ultra-a@gmail.com");
+    const hashB = collectorAccountHash("owner-personal-pro-b@gmail.com");
+    const resetA = "2026-12-06T07:00:00Z";
+    const resetB = "2026-12-04T00:00:00Z"; // 早于 resetA 超过 6 小时
+
+    // 1) 组长在 A 号（周剩余 74%）同步并锁号
+    await storeO.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: hashA,
+      accountTier: "ultra",
+      collectionStatus: "active",
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 74.0, resetAt: resetA, capturedAtMs: t }],
+    });
+
+    // 2) 服务端第二道防线：即使恶意或异常请求直接携带 B 号（100% Pro）或缺失指纹的快照，服务端一律拒收
+    t += 90_000;
+    const rogueB = await storeO.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: hashB,
+      accountTier: "pro",
+      collectionStatus: "active",
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 100.0, resetAt: resetB, capturedAtMs: t }],
+    });
+    assert.equal(rogueB.ignoredQuotaSnapshots, 1, "不匹配组长 bound_account_hash 的 B 号水位快照必须被服务端拒收");
+
+    t += 90_000;
+    const rogueEmpty = await storeO.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: "",
+      collectionStatus: "active",
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 100.0, resetAt: resetB, capturedAtMs: t }],
+    });
+    assert.equal(rogueEmpty.ignoredQuotaSnapshots, 1, "已升级 v1.6.0 且已锁号的组长若突发无指纹快照，服务端也必须拒收");
+
+    // 3) 组长切回 A 号（仍为 74%）-> 余额与告警全零误报
+    t += 90_000;
+    await storeO.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: hashA,
+      accountTier: "ultra",
+      collectionStatus: "active",
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 74.0, resetAt: resetA, capturedAtMs: t }],
+    });
+
+    const dash = await storeO.getAdminDashboard(t);
+    assert.equal(dash.pools.gemini.weekly.remainingPct, 74.0, "总池水位绝不能被个人 B 号 100% 污染");
+    assert.equal(dash.members.find((m) => m.id === own.id).accountTier, "ultra", "组长订阅档位绝不能被 B 号 Pro 覆盖");
+    assert.equal(dash.members.find((m) => m.id === mem.id).balanceFen, 2000, "成员余额零误扣");
+    assert.equal(
+      dash.alerts.filter((a) => a.kind === "quota_reset" || a.kind.startsWith("blackhole")).length,
+      0,
+      "绝不产生假重置或假黑洞告警"
+    );
+
+    // 4) 引擎第三道防线：直接调用 evaluateQuotaDelta 模拟 reset_at 倒退 >6h -> isAnchorSwitch 熔断
+    const deltaRewind = evaluateQuotaDelta(74.0, 100.0, resetA, resetB);
+    assert.equal(deltaRewind.isAnchorSwitch, true);
+    assert.equal(deltaRewind.isReset, false);
+    assert.equal(deltaRewind.dropPct, 0);
+  });
+
+  // 20 (Red-Team #3). shared_owner_account 模式带 &ah= 绑定码：挂着 B 号首次粘贴立刻暂停保护，绝不绑错号，但可看全组余量
+  await test("multi-account:shared-owner-account-mode-blocks-wrong-account-on-first-bind", async () => {
+    let t = Date.parse("2026-11-29T14:00:00Z");
+    const dbS = new DatabaseSync(":memory:");
+    const storeS = new LedgerStore(wrapNodeSqliteAdapter(dbS), { nowFn: () => t });
+    await storeS.ensureSchema(SCHEMA_SQL);
+    const d0 = await storeS.getAdminDashboard(t);
+    const own = d0.members.find((m) => m.role === "owner");
+    const mem = await storeS.createMember({ name: "合租成员丑" });
+
+    const hashShared = collectorAccountHash("shared-family-owner@gmail.com");
+    const hashPersonal = collectorAccountHash("member-personal@gmail.com");
+
+    await storeS.updateSettings({
+      account_isolation_mode: "shared_owner_account",
+      shared_account_hash: hashShared,
+    });
+    await storeS.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: hashShared,
+      accountTier: "ultra",
+      collectionStatus: "active",
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 66.5, resetAt: "2026-12-06T00:00:00Z", capturedAtMs: t }],
+    });
+
+    const { server, port } = await startLedgerHttpServer(storeS);
+    try {
+      const code = buildInviteCode({
+        serverUrl: `http://127.0.0.1:${port}`,
+        memberToken: mem.member_token,
+        ruleVersion: 1,
+        ledgerMode: "board_only",
+        targetAccountHash: hashShared,
+      });
+      assert.ok(code.includes(`&ah=${hashShared}`), "shared 模式绑定码必须携带 &ah=<20位hex>");
+      const parsed = parseInviteCode(code);
+      assert.equal(parsed.targetAccountHash, hashShared);
+
+      const workDir = fs.mkdtempSync(path.join(tmpDir, "rt-shared-"));
+      const col = new MemberLedgerCollector({
+        configPath: path.join(workDir, "config.json"),
+        defaultConfigPath: path.join(workDir, "config.default.json"),
+        statePath: path.join(workDir, "state.json"),
+        transcriptRoots: [],
+        nowFn: () => t,
+        fetchUserStatusImpl: async () => ({
+          ok: true,
+          statusCode: 200,
+          loggedIn: true,
+          accountHash: hashPersonal,
+          accountMasked: "mem***@gmail.com",
+          accountTier: "free",
+        }),
+      });
+
+      col.saveConfig({ inviteCode: code });
+      const res = await col.syncOnce();
+      assert.equal(res.ok, true);
+      assert.equal(
+        res.state.accountGuard.collectionState,
+        COLLECTION_STATES.PAUSED_ACCOUNT_MISMATCH,
+        "挂着个人号 B 粘贴带 &ah= 绑定码必须立刻进入 PAUSED_ACCOUNT_MISMATCH"
+      );
+      assert.notEqual(col.config.boundAccountHash, hashPersonal, "绝不得把个人号 B 误绑为目标账号");
+      assert.equal(res.state.accountGuard.canSelfRebind, false, "shared_owner_account 模式下成员端不得允许自助换绑");
+      assert.equal(res.state.memberView?.pools?.gemini?.weekly?.remainingPct, 66.5, "处于切号暂停态仍应能看到全组余量");
+    } finally {
+      server.close();
+    }
+  });
+
+  // 21 (Red-Team #4). 解绑与换码立即净空待传队列，未绑定期间停止后台采集且重绑绝不翻旧账
+  await test("lifecycle:unbind-and-rebind-purges-pending-queue-and-stops-background-harvest", async () => {
+    let t = Date.parse("2026-11-29T15:00:00Z");
+    const dbU = new DatabaseSync(":memory:");
+    const storeU = new LedgerStore(wrapNodeSqliteAdapter(dbU), { nowFn: () => t });
+    await storeU.ensureSchema(SCHEMA_SQL);
+    const mem1 = await storeU.createMember({ name: "旧身份" });
+    const mem2 = await storeU.createMember({ name: "新身份" });
+
+    const { server, port } = await startLedgerHttpServer(storeU);
+    try {
+      const workDir = fs.mkdtempSync(path.join(tmpDir, "rt-unbind-"));
+      const brainRoot = path.join(workDir, "brain");
+      fs.mkdirSync(brainRoot, { recursive: true });
+
+      const col = new MemberLedgerCollector({
+        configPath: path.join(workDir, "config.json"),
+        defaultConfigPath: path.join(workDir, "config.default.json"),
+        statePath: path.join(workDir, "state.json"),
+        transcriptRoots: [brainRoot],
+        nowFn: () => t,
+        fetchUserStatusImpl: async () => ({
+          ok: true,
+          statusCode: 200,
+          loggedIn: true,
+          accountHash: collectorAccountHash("user-u@gmail.com"),
+          accountMasked: "use***@gmail.com",
+          accountTier: "ultra",
+        }),
+      });
+
+      // 先绑定到一个不可达端口，制造断网积压队列
+      col.saveConfig({ serverUrl: "http://127.0.0.1:1", memberToken: mem1.member_token });
+      await col.tickAccountGuard();
+      t += 10_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-before-unbind",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "gemini-4-neon-xhigh",
+          created_at: new Date(t).toISOString(),
+          input_tokens: 30000,
+          output_tokens: 2000,
+        },
+        t
+      );
+      await col.tickAccountGuard();
+      assert.equal(col.state.pendingEvents.length, 1, "解绑前队列应积压 1 条");
+
+      // 点击解绑 -> 队列必须立即清空！
+      col.unbind();
+      assert.equal(col.state.pendingEvents.length, 0, "unbind() 必须立即清空 pendingEvents");
+      assert.equal(col.state.collectionState, COLLECTION_STATES.UNBOUND);
+
+      // 未绑定期间新写对话日志并跑多轮守卫/同步 -> 队列始终为 0
+      for (let i = 0; i < 3; i++) {
+        t += 15_000;
+        writeTranscriptStep(
+          brainRoot,
+          `conv-while-unbound-${i}`,
+          {
+            step_index: 1,
+            type: "PLANNER_RESPONSE",
+            status: "DONE",
+            model: "gemini-4-carbon-high",
+            created_at: new Date(t).toISOString(),
+            input_tokens: 50000,
+            output_tokens: 4000,
+          },
+          t
+        );
+        await col.tickAccountGuard();
+        await col.syncOnce();
+        assert.equal(col.state.pendingEvents.length, 0, "未绑定状态下严禁后台采集入队");
+      }
+
+      // 重新绑定新成员凭证 -> 绝不补传解绑前后的任何历史对话
+      t += 10_000;
+      col.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, memberToken: mem2.member_token });
+      const resRebind = await col.syncOnce();
+      assert.equal(resRebind.ok, true);
+      const cntMem2 = await storeU.db.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [mem2.id]);
+      assert.equal(Number(cntMem2.cnt), 0, "重绑后绝不得把解绑前后历史对话补传到新凭证名下");
+    } finally {
+      server.close();
+    }
+  });
+
+  // 22 (Red-Team #5). 插件停摆窗口（>45s）防翻旧账 + 手动暂停/恢复（从此刻起算）
+  await test("lifecycle:plugin-disabled-gap-and-manual-pause-resume-from-now", async () => {
+    let t = Date.parse("2026-11-29T16:00:00Z");
+    const dbG = new DatabaseSync(":memory:");
+    const storeG = new LedgerStore(wrapNodeSqliteAdapter(dbG), { nowFn: () => t });
+    await storeG.ensureSchema(SCHEMA_SQL);
+    const mem = await storeG.createMember({ name: "暂停恢复测试员" });
+    const { server, port } = await startLedgerHttpServer(storeG);
+
+    try {
+      const workDir = fs.mkdtempSync(path.join(tmpDir, "rt-gap-"));
+      const brainRoot = path.join(workDir, "brain");
+      fs.mkdirSync(brainRoot, { recursive: true });
+      const cfgPath = path.join(workDir, "config.json");
+      const stPath = path.join(workDir, "state.json");
+      const fakeUser = async () => ({
+        ok: true,
+        statusCode: 200,
+        loggedIn: true,
+        accountHash: collectorAccountHash("gap-tester@gmail.com"),
+        accountMasked: "gap***@gmail.com",
+        accountTier: "ultra",
+      });
+
+      const col1 = new MemberLedgerCollector({
+        configPath: cfgPath,
+        defaultConfigPath: path.join(workDir, "config.default.json"),
+        statePath: stPath,
+        transcriptRoots: [brainRoot],
+        nowFn: () => t,
+        fetchUserStatusImpl: fakeUser,
+      });
+      col1.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, memberToken: mem.member_token });
+      await col1.syncOnce();
+
+      // 模拟插件被禁用 70 秒（>45s），期间用户在 t + 20s 产生 B 号新对话
+      const bConvTime = t + 20_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-during-disabled-gap",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "claude-opus-5-5-high",
+          created_at: new Date(bConvTime).toISOString(),
+          input_tokens: 80000,
+          output_tokens: 6000,
+        },
+        bConvTime
+      );
+
+      // t + 70s 插件重新启用（新实例重启）
+      t += 70_000;
+      const col2 = new MemberLedgerCollector({
+        configPath: cfgPath,
+        defaultConfigPath: path.join(workDir, "config.default.json"),
+        statePath: stPath,
+        transcriptRoots: [brainRoot],
+        nowFn: () => t,
+        fetchUserStatusImpl: fakeUser,
+      });
+      await col2.syncOnce();
+      const cntAfterGap = await storeG.db.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [mem.id]);
+      assert.equal(Number(cntAfterGap.cnt), 0, "插件停摆超过 45s 期间产生的对话在重启后绝不得翻旧账补扫");
+
+      // 手动暂停 -> 产生对话 -> 恢复（从此刻起算）-> 暂停期对话 0 补扫，恢复后新对话首轮正常入账
+      t += 10_000;
+      col2.setManualPaused(true);
+      await col2.syncOnce();
+      assert.equal(col2.state.collectionState, COLLECTION_STATES.PAUSED_MANUAL);
+
+      t += 10_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-during-manual-pause",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "gemini-4-carbon-high",
+          created_at: new Date(t).toISOString(),
+          input_tokens: 60000,
+          output_tokens: 5000,
+        },
+        t
+      );
+      await col2.tickAccountGuard();
+      assert.equal(col2.state.pendingEvents.length, 0);
+
+      t += 10_000;
+      col2.setManualPaused(false);
+      await col2.syncOnce();
+      const cntAfterResume = await storeG.db.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [mem.id]);
+      assert.equal(Number(cntAfterResume.cnt), 0, "点击恢复统计后不得补扫手动暂停期间的历史记录");
+
+      // 恢复后新建对话 -> 首轮必须完整入账
+      t += 5_000;
+      writeTranscriptStep(
+        brainRoot,
+        "conv-after-resume",
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          model: "gemini-4-neon-xhigh",
+          created_at: new Date(t).toISOString(),
+          input_tokens: 18000,
+          output_tokens: 1500,
+        },
+        t
+      );
+      await col2.syncOnce();
+      const cntFinal = await storeG.db.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [mem.id]);
+      assert.equal(Number(cntFinal.cnt), 1, "恢复统计后的新对话首轮步骤必须正常采集入账");
+    } finally {
+      server.close();
+    }
+  });
+
+  // 23 (Red-Team #6). 回退重试相同 step_index 不丢步 + step_index:0 与缺失 step_index 零碰撞 + 重扫幂等
+  await test("collector:duplicate-step-index-on-retry-and-missing-step-index-no-collision", async () => {
+    const root = path.join(tmpDir, "rt-step-idx");
+    const t0 = Date.parse("2026-11-29T17:00:00Z");
+    const logDir = path.join(root, "conv-retry-case", ".system_generated", "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, "transcript.jsonl");
+
+    const lines = [
+      // 真实捕获场景：同一会话回退重试产生两条 step_index: 110，不同时间戳与 Token（含 272,706）
+      JSON.stringify({
+        step_index: 110,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "gemini-4-neon-xhigh",
+        created_at: "2026-11-29T17:01:00.000Z",
+        input_tokens: 272706,
+        output_tokens: 1200,
+      }),
+      JSON.stringify({
+        step_index: 110,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "gemini-4-neon-xhigh",
+        created_at: "2026-11-29T17:02:15.000Z",
+        input_tokens: 185000,
+        output_tokens: 2400,
+      }),
+      // 合法 step_index: 0
+      JSON.stringify({
+        step_index: 0,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "gemini-4-hydrogen-high",
+        created_at: "2026-11-29T17:03:00.000Z",
+        input_tokens: 5000,
+        output_tokens: 300,
+      }),
+      // 两条均缺失 step_index（即使时间戳与 Token 完全相同，因 lineOffset 不同也绝不碰撞）
+      JSON.stringify({
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "claude-opus-5-5-high",
+        created_at: "2026-11-29T17:04:00.000Z",
+        input_tokens: 9000,
+        output_tokens: 600,
+      }),
+      JSON.stringify({
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "claude-opus-5-5-high",
+        created_at: "2026-11-29T17:04:00.000Z",
+        input_tokens: 9000,
+        output_tokens: 600,
+      }),
+    ];
+    fs.writeFileSync(logPath, lines.join("\n") + "\n", "utf8");
+    const mtimeSec = (t0 + 300_000) / 1000;
+    fs.utimesSync(logPath, mtimeSec, mtimeSec);
+
+    const st1 = { installedAtMs: t0, fileOffsets: {} };
+    const evs1 = scanIncrementalTranscriptUsage(st1, [root], { nowMs: t0 + 600_000 });
+    assert.equal(evs1.length, 5, "5 条步骤必须全部采集，零丢步");
+    const ids1 = new Set(evs1.map((e) => e.id));
+    assert.equal(ids1.size, 5, "同 step_index 回退重试与无 step_index 记录必须拥有 5 个互不碰撞的唯一 ID");
+    assert.ok(evs1[0].id.includes(":s110:") && evs1[1].id.includes(":s110:") && evs1[0].id !== evs1[1].id);
+    assert.ok(evs1[2].id.includes(":s0:"), "合法 step_index:0 应生成 :s0: 前缀");
+    assert.ok(evs1[3].id.includes(":ns:") && evs1[4].id.includes(":ns:") && evs1[3].id !== evs1[4].id, "缺失 step_index 应使用 :ns: 且按 lineOffset 去撞");
+
+    // 从 0 重扫同一文件 -> 所有 ID 100% 确定性一致（保证服务端幂等去重）
+    const st2 = { installedAtMs: t0, fileOffsets: {} };
+    const evs2 = scanIncrementalTranscriptUsage(st2, [root], { nowMs: t0 + 600_000 });
+    assert.deepEqual(
+      evs2.map((e) => e.id),
+      evs1.map((e) => e.id),
+      "重扫同一日志行必须生成 100% 一致的幂等 ID"
+    );
+  });
+
+  // 24 (Red-Team #7). antigravity-cli/brain 三端目录覆盖 + 老状态升级首次新增目录锚定末尾不翻旧账
+  await test("collector:cli-brain-root-coverage-and-upgrade-eof-anchor", async () => {
+    const fakeGeminiDir = path.join(tmpDir, "rt-cli-gemini");
+    const roots = getDefaultTranscriptRoots({ ANTIGRAVITY_GEMINI_DIR: fakeGeminiDir });
+    assert.ok(roots.some((r) => r.endsWith(path.join("antigravity", "brain"))));
+    assert.ok(roots.some((r) => r.endsWith(path.join("antigravity-ide", "brain"))));
+    assert.ok(roots.some((r) => r.endsWith(path.join("antigravity-cli", "brain"))), "必须覆盖 antigravity-cli/brain");
+
+    const appRoot = path.join(fakeGeminiDir, "antigravity", "brain");
+    const cliRoot = path.join(fakeGeminiDir, "antigravity-cli", "brain");
+    const tOldInstall = Date.parse("2026-11-20T00:00:00Z");
+    const tNow = Date.parse("2026-11-29T18:00:00Z");
+
+    // 已有 App 对话 + 升级前已存在的 CLI 历史对话（晚于 tOldInstall）
+    const existingAppLog = writeTranscriptStep(
+      appRoot,
+      "app-existing",
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "gemini-4-neon-xhigh",
+        created_at: "2026-11-28T10:00:00Z",
+        input_tokens: 10000,
+        output_tokens: 500,
+      },
+      tNow - 3600_000
+    );
+    writeTranscriptStep(
+      cliRoot,
+      "cli-legacy-history",
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "gemini-4-carbon-high",
+        created_at: "2026-11-29T10:00:00Z",
+        input_tokens: 99000,
+        output_tokens: 5000,
+      },
+      tNow - 1800_000
+    );
+
+    // 模拟 v1.5.0 老状态文件：无 knownRoots，仅记录了 appRoot 下的偏移
+    const legacyState = {
+      installedAtMs: tOldInstall,
+      fileOffsets: {
+        [existingAppLog.toLowerCase()]: fs.statSync(existingAppLog).size,
+      },
+    };
+
+    const firstUpgradeScan = scanIncrementalTranscriptUsage(legacyState, [appRoot, cliRoot], { nowMs: tNow });
+    assert.equal(firstUpgradeScan.length, 0, "老状态升级首次挂载 antigravity-cli/brain 时，旧历史对话必须锚定末尾零翻旧账");
+    assert.ok(Array.isArray(legacyState.knownRoots) && legacyState.knownRoots.length >= 2);
+
+    // 升级完成后在 antigravity-cli/brain 新开对话 -> 必须完整采集！
+    writeTranscriptStep(
+      cliRoot,
+      "cli-brand-new",
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        model: "gemini-4-neon-xhigh",
+        created_at: new Date(tNow + 5000).toISOString(),
+        input_tokens: 24000,
+        output_tokens: 1800,
+      },
+      tNow + 5000
+    );
+    const secondScan = scanIncrementalTranscriptUsage(legacyState, [appRoot, cliRoot], { nowMs: tNow + 10_000 });
+    assert.equal(secondScan.length, 1, "升级后在 antigravity-cli/brain 新建的对话必须完整采集");
+    assert.equal(secondScan[0].uncachedInputTokens, 24000);
+  });
+
+  // 25 (Red-Team #8). 非整 5 分钟重置点（07:02:12Z）：跨周重置秒级封账，旧周记录绝不漏入新周扣费
+  await test("billing:cross-reset-mid-slice-timestamp-never-leaks-old-week-usage", async () => {
+    let t = Date.parse("2026-12-03T06:55:00Z");
+    const dbR = new DatabaseSync(":memory:");
+    const storeR = new LedgerStore(wrapNodeSqliteAdapter(dbR), { nowFn: () => t });
+    await storeR.ensureSchema(SCHEMA_SQL);
+    await storeR.updateSettings({ ledger_mode: "prepaid", gemini_fen_per_weekly_pct: 100 });
+    const d0 = await storeR.getAdminDashboard(t);
+    const own = d0.members.find((m) => m.role === "owner");
+    const oldWeekMember = await storeR.createMember({ name: "旧周成员", initialBalanceFen: 2000 });
+
+    const oldResetIso = "2026-12-03T07:02:12Z";
+    const newResetIso = "2026-12-10T07:02:12Z";
+
+    await storeR.ingestHeartbeat(own.memberToken, {
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 60.0, resetAt: oldResetIso, capturedAtMs: t }],
+    });
+
+    // 07:01:00Z（旧周，但落在 07:00:00Z~07:05:00Z 同一 5 分钟切片内）产生大额消耗
+    t = Date.parse("2026-12-03T07:01:00Z");
+    await storeR.ingestHeartbeat(oldWeekMember.member_token, {
+      usageEvents: [
+        { id: "old_week_heavy:s1", modelName: "gemini-4-carbon-high", uncachedInputTokens: 600000, outputTokens: 150000, timestampMs: t },
+      ],
+    });
+
+    // 07:03:00Z 组长触发跨周重置快照（100%，新 resetAt）
+    t = Date.parse("2026-12-03T07:03:00Z");
+    await storeR.ingestHeartbeat(own.memberToken, {
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 100.0, resetAt: newResetIso, capturedAtMs: t }],
+    });
+
+    // 验证旧周记录已被负号快照 ID 封账
+    const sealedRow = await storeR.db.first("SELECT settled_snapshot_id FROM usage_reports WHERE member_id = ?", [oldWeekMember.id]);
+    assert.ok(Number(sealedRow?.settled_snapshot_id) < 0, "旧周遗留未结算记录必须在跨周重置时被封账为负快照 ID");
+
+    // 07:04:30Z（仍在 07:00:00Z 切片内！）新周水位下降 1%（99%）
+    t = Date.parse("2026-12-03T07:04:30Z");
+    await storeR.ingestHeartbeat(own.memberToken, {
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 99.0, resetAt: newResetIso, capturedAtMs: t }],
+    });
+
+    const dashAfter = await storeR.getAdminDashboard(t);
+    const mAfter = dashAfter.members.find((m) => m.id === oldWeekMember.id);
+    assert.equal(mAfter.week.geminiPct, 0, "07:01:00Z 旧周记录绝不得混入新周百分比分摊");
+    assert.equal(mAfter.balanceFen, 2000, "07:01:00Z 旧周记录绝不得在新周产生任何扣费");
+  });
+
+  // 26 (Red-Team #9). 模型归类（下划线词边界/Orchestrator/GPT-OSS）与 Pro 独立 Argon 桶动态隔离
+  await test("billing:model-classification-underscore-orchestrator-and-pro-argon-isolation", async () => {
+    const geminiModels = [
+      "neon_xhigh",
+      "flash_lite",
+      "Orchestrator (Carbon)",
+      "Orchestrator (Neon)",
+      "Orchestrator (Argon)",
+      "Orchestrator",
+      "gemini-4-hydrogen-tiered-high",
+      "gemini-4-argon-high",
+    ];
+    for (const m of geminiModels) {
+      assert.equal(engineClassifyPool(m), "gemini", `engine 应将 ${m} 归入 gemini 池`);
+      assert.equal(collectorClassifyPool(m), "gemini", `collector 应将 ${m} 归入 gemini 池`);
+    }
+    for (const m of ["GPT-OSS 120B", "gpt-oss-120b", "claude-opus-5-5-high", "claude-sonnet-5-5"]) {
+      assert.equal(engineClassifyPool(m), "3p", `engine 应将 ${m} 归入 3p 池`);
+      assert.equal(collectorClassifyPool(m), "3p", `collector 应将 ${m} 归入 3p 池`);
+    }
+    assert.equal(getModelMultiplier("Orchestrator (Carbon)"), 3.0);
+    assert.equal(getModelMultiplier("Orchestrator (Argon)"), 1.5);
+    assert.equal(getModelMultiplier("Orchestrator (Neon)"), 1.0);
+
+    // parseQuotaSummaryResponse 识别 Pro 独立 Argon 桶 vs Ultra 共享池
+    const proParsed = parseQuotaSummaryResponse({
+      groups: [
+        {
+          displayName: "Gemini Models",
+          buckets: [
+            { bucketId: "gemini-weekly", remainingFraction: 0.9, resetTime: "2026-12-06T00:00:00Z" },
+            { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.75, resetTime: "2026-12-06T00:00:00Z" },
+          ],
+        },
+      ],
+    });
+    assert.equal(proParsed.hasSeparateArgonPool, true, "未禁用的独立 argon 桶必须置 hasSeparateArgonPool=true");
+    assert.equal(proParsed.snapshots.length, 1);
+
+    const disabledArgonParsed = parseQuotaSummaryResponse({
+      buckets: [
+        { bucketId: "gemini-weekly", remainingFraction: 0.9, resetTime: "2026-12-06T00:00:00Z" },
+        { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 1.0, disabled: true },
+      ],
+    });
+    assert.equal(disabledArgonParsed.hasSeparateArgonPool, false, "disabled=true 的 argon 桶不得触发独立池隔离");
+
+    // 端到端验证：禁用 3P 规则下使用 neon_xhigh / Orchestrator (Carbon) 绝不误报违规；Pro 独立 Argon 桶不混入普通 gemini 周池分摊，Ultra 下照常 1.5x 分摊
+    let t = Date.parse("2026-11-30T08:00:00Z");
+    const dbA = new DatabaseSync(":memory:");
+    const storeA = new LedgerStore(wrapNodeSqliteAdapter(dbA), { nowFn: () => t });
+    await storeA.ensureSchema(SCHEMA_SQL);
+    await storeA.updateSettings({ restrict_3p_for_members: true });
+    const d0 = await storeA.getAdminDashboard(t);
+    const own = d0.members.find((m) => m.role === "owner");
+    const argonUser = await storeA.createMember({ name: "Argon用户" });
+    const neonUser = await storeA.createMember({ name: "Neon用户" });
+    await storeA.confirmMemberRules(argonUser.member_token);
+    await storeA.confirmMemberRules(neonUser.member_token);
+
+    const rIso = "2026-12-07T00:00:00Z";
+    await storeA.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: collectorAccountHash("pro-owner@gmail.com"),
+      accountTier: "pro",
+      hasSeparateArgonPool: true,
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 100.0, resetAt: rIso, capturedAtMs: t }],
+    });
+
+    t += 60_000;
+    await storeA.ingestHeartbeat(argonUser.member_token, {
+      usageEvents: [
+        { id: "ag1:s1", modelName: "gemini-4-argon-high", uncachedInputTokens: 100000, outputTokens: 25000, timestampMs: t - 5000 },
+      ],
+    });
+    await storeA.ingestHeartbeat(neonUser.member_token, {
+      usageEvents: [
+        { id: "ne1:s1", modelName: "neon_xhigh", uncachedInputTokens: 100000, outputTokens: 25000, timestampMs: t - 4000 },
+        { id: "oc1:s2", modelName: "Orchestrator (Carbon)", uncachedInputTokens: 10000, outputTokens: 2000, timestampMs: t - 3000 },
+      ],
+    });
+    await storeA.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: collectorAccountHash("pro-owner@gmail.com"),
+      accountTier: "pro",
+      hasSeparateArgonPool: true,
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 96.0, resetAt: rIso, capturedAtMs: t }],
+    });
+
+    const dashPro = await storeA.getAdminDashboard(t);
+    assert.equal(dashPro.members.find((m) => m.id === neonUser.id).poolViolated, false, "neon_xhigh 与 Orchestrator (Carbon) 绝不得误触 3P 违规");
+    assert.equal(dashPro.members.find((m) => m.id === argonUser.id).week.geminiPct, 0, "Pro 独立 Argon 桶开启时，Argon 用量不得替他人分摊普通 gemini 周池");
+    assert.equal(dashPro.members.find((m) => m.id === neonUser.id).week.geminiPct, 4, "普通 gemini 周池掉落 4% 应全部分摊给 Neon/Orchestrator 用户");
+
+    // 切换为 Ultra 共享池（has_separate_argon_pool = false）-> Argon 按 1.5x 正常参与分摊
+    t += 60_000;
+    await storeA.ingestHeartbeat(argonUser.member_token, {
+      usageEvents: [
+        { id: "ag2:s1", modelName: "gemini-4-argon-high", uncachedInputTokens: 100000, outputTokens: 25000, timestampMs: t - 5000 },
+      ],
+    });
+    await storeA.ingestHeartbeat(neonUser.member_token, {
+      usageEvents: [
+        { id: "ne2:s1", modelName: "gemini-4-neon-xhigh", uncachedInputTokens: 100000, outputTokens: 25000, timestampMs: t - 4000 },
+      ],
+    });
+    await storeA.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: collectorAccountHash("pro-owner@gmail.com"),
+      accountTier: "ultra",
+      hasSeparateArgonPool: false,
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 91.0, resetAt: rIso, capturedAtMs: t }],
+    });
+    const dashUltra = await storeA.getAdminDashboard(t);
+    // 同等 token 下 Argon 1.5x vs Neon 1.0x -> 占 60%（5% * 0.6 = 3.0%）
+    assert.equal(dashUltra.members.find((m) => m.id === argonUser.id).week.geminiPct, 3, "Ultra 共享池下 Argon 必须按 1.5x 权重分摊 3.0%");
+  });
+
+  // 27 (Red-Team #10). Pro vs Ultra 档位防背锅/黑洞基准自适应
+  await test("billing:pro-vs-ultra-tier-adaptive-explainable-cap", async () => {
+    let t = Date.parse("2026-11-30T10:00:00Z");
+    const dbP = new DatabaseSync(":memory:");
+    const storeP = new LedgerStore(wrapNodeSqliteAdapter(dbP), { nowFn: () => t });
+    await storeP.ensureSchema(SCHEMA_SQL);
+    const d0 = await storeP.getAdminDashboard(t);
+    const own = d0.members.find((m) => m.role === "owner");
+    const mem = await storeP.createMember({ name: "Pro组员" });
+    const ownHash = collectorAccountHash("pro-group-owner@gmail.com");
+    const rIso = "2026-12-07T00:00:00Z";
+
+    // plan_tier 为默认 auto，组长上报 accountTier: "pro"
+    assert.equal(d0.settings.plan_tier, "auto");
+    await storeP.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: ownHash,
+      accountTier: "pro",
+      quotaSnapshots: [{ poolKey: "3p", windowKey: "weekly", remainingPct: 100.0, resetAt: rIso, capturedAtMs: t }],
+    });
+
+    // 单轮合理 Opus 消耗（约 44,000 加权单位），Pro 小池下降 3.5% -> Pro 基准 45,000 应全额解释 3.5%，零黑洞！
+    t += 90_000;
+    await storeP.ingestHeartbeat(mem.member_token, {
+      usageEvents: [
+        { id: "pro3p:s1", modelName: "claude-opus-5-5-high", uncachedInputTokens: 10000, outputTokens: 3000, timestampMs: t - 5000 },
+      ],
+    });
+    await storeP.ingestHeartbeat(own.memberToken, {
+      clientVersion: "1.6.0",
+      accountHash: ownHash,
+      accountTier: "pro",
+      quotaSnapshots: [{ poolKey: "3p", windowKey: "weekly", remainingPct: 96.5, resetAt: rIso, capturedAtMs: t }],
+    });
+
+    const dashMid = await storeP.getAdminDashboard(t);
+    assert.equal(dashMid.summary.effectivePlanTier, "pro");
+    assert.equal(dashMid.members.find((m) => m.id === mem.id).week.thirdPartyPct, 3.5, "Pro 小池 3.5% 合理消耗必须全额正常分摊");
+    assert.equal(
+      dashMid.alerts.filter((a) => a.kind.startsWith("blackhole")).length,
+      0,
+      "Pro 合理单轮消耗不得误报黑洞告警"
+    );
+
+    // 未装插件偷跑 10%（分两次各 5%，无上报）-> 仍须准确触发黑洞告警！
+    for (const nextRem of [91.5, 86.5]) {
+      t += 90_000;
+      await storeP.ingestHeartbeat(own.memberToken, {
+        clientVersion: "1.6.0",
+        accountHash: ownHash,
+        accountTier: "pro",
+        quotaSnapshots: [{ poolKey: "3p", windowKey: "weekly", remainingPct: nextRem, resetAt: rIso, capturedAtMs: t }],
+      });
+    }
+    const dashAfterStealth = await storeP.getAdminDashboard(t);
+    assert.ok(
+      dashAfterStealth.alerts.some((a) => (a.kind === "blackhole_warn" || a.kind === "blackhole_critical") && a.pool_key === "3p"),
+      "Pro 模式下未装插件偷跑 10% 仍必须准确报警"
+    );
+  });
+
+  // 28 (Red-Team #11). SidecarLease 单实例租约抢占 + 连续 3 次本地 401/ECONNREFUSED 自愈与 10 分钟冷却锁
+  await test("sidecar:single-instance-lease-and-ls-disconnect-cooldown-guard", async () => {
+    const leaseDir = fs.mkdtempSync(path.join(tmpDir, "rt-lease-"));
+    const leasePath = path.join(leaseDir, "active-sidecar.json");
+
+    const lease1 = new SidecarLease({ leasePath, pollIntervalMs: 500 });
+    lease1.acquire();
+    assert.equal(lease1.isOwner(), true);
+
+    let lostCount = 0;
+    lease1.watchOwnership(() => {
+      lostCount++;
+    });
+
+    const lease2 = new SidecarLease({ leasePath, pollIntervalMs: 500 });
+    lease2.acquire();
+    assert.equal(lease2.isOwner(), true);
+    assert.equal(lease1.isOwner(), false, "第二个 SidecarLease 抢占后旧实例必须立刻失去所有权");
+
+    // 等待 fs.watch 或短轮询触发 onLost
+    await new Promise((r) => setTimeout(r, 120));
+    lease1._notifyLostIfNeeded();
+    assert.equal(lostCount, 1, "失锁回调必须触发且仅触发一次");
+    lease1.stop();
+    lease2.stop();
+
+    // 连续 3 次 401 / ECONNREFUSED 触发受控自愈 + 10 分钟冷却锁防死循环
+    let t = Date.parse("2026-11-30T11:00:00Z");
+    const colDir = fs.mkdtempSync(path.join(tmpDir, "rt-heal-"));
+    const cfgPath = path.join(colDir, "config.json");
+    const stPath = path.join(colDir, "state.json");
+    let healCalls = 0;
+
+    const makeHostedCol = () =>
+      new MemberLedgerCollector({
+        configPath: cfgPath,
+        defaultConfigPath: path.join(colDir, "config.default.json"),
+        statePath: stPath,
+        transcriptRoots: [],
+        env: { ANTIGRAVITY_SIDECAR_WEB_PORT: "19999" },
+        nowFn: () => t,
+        fetchUserStatusImpl: async () => ({
+          ok: false,
+          statusCode: 401,
+          code: "ECONNREFUSED",
+          reason: "http_401",
+          loggedIn: false,
+          accountHash: "",
+          accountMasked: "",
+          accountTier: "",
+        }),
+        onSelfHealRequested: () => {
+          healCalls++;
+        },
+      });
+
+    const c1 = makeHostedCol();
+    c1.saveConfig({ serverUrl: "https://demo.workers.dev", memberToken: "agf_heal_test_token_01" });
+    await c1.tickAccountGuard(); // fail 1
+    await c1.tickAccountGuard(); // fail 2
+    assert.equal(healCalls, 0, "前 2 次失败不得触发自愈退出");
+    const g3 = await c1.tickAccountGuard(); // fail 3
+    assert.equal(g3.state, COLLECTION_STATES.PAUSED_IDENTITY_UNAVAILABLE);
+    assert.equal(healCalls, 1, "连续第 3 次 401/ECONNREFUSED 必须触发受控自愈一次");
+
+    // 2 分钟后宿主拉起新进程再次连续 3 次失败 -> 受 10 分钟冷却锁保护，绝不死循环重启
+    t += 2 * 60 * 1000;
+    const c2 = makeHostedCol();
+    await c2.tickAccountGuard();
+    await c2.tickAccountGuard();
+    await c2.tickAccountGuard();
+    assert.equal(healCalls, 1, "10 分钟冷却期内严禁重复触发自愈退出");
+    assert.equal(c2.state.lsConnectionIssue?.coolingDown, true);
+
+    // 超过 10 分钟后（+11 分钟）再次重启连续 3 次失败 -> 冷却解除允许再次自愈
+    t += 11 * 60 * 1000;
+    const c3 = makeHostedCol();
+    await c3.tickAccountGuard();
+    await c3.tickAccountGuard();
+    await c3.tickAccountGuard();
+    assert.equal(healCalls, 2, "满 10 分钟冷却后应重新允许一次受控自愈");
+  });
+
+  // 29 (Red-Team #12). v1.5.0 旧端兼容 + 多设备规则版本单调性 + 指纹算法一致 + 静态隐私零子进程红线扫描
+  await test("compat:v150-legacy-client-and-multi-device-rule-version-monotonicity", async () => {
+    // 1) Pure-JS SHA-256 (billing-engine) 与 Node crypto (collector) 指纹 100% 一致
+    for (const email of ["Alice.Test@Gmail.com ", "a@b.co", "bruce771@example.org"]) {
+      assert.equal(
+        engineAccountHash(email),
+        collectorAccountHash(email),
+        `引擎与采集器对 ${email} 的账号短指纹必须 100% 一致`
+      );
+      assert.match(engineAccountHash(email), /^[0-9a-f]{20}$/);
+    }
+    assert.equal(maskEmailForLocalDisplay("alice.demo@example.com"), "ali***@example.com");
+    assert.equal(maskEmailForLocalDisplay("ab@gmail.com"), "a***@gmail.com");
+
+    // 2) v1.5.0 旧客户端不带 accountHash / deviceId 在 v1.6.0 服务端无缝运行
+    let t = Date.parse("2026-11-30T12:00:00Z");
+    const dbC = new DatabaseSync(":memory:");
+    const storeC = new LedgerStore(wrapNodeSqliteAdapter(dbC), { nowFn: () => t });
+    await storeC.ensureSchema(SCHEMA_SQL);
+    const legacyMem = await storeC.createMember({ name: "旧版成员" });
+    const multiDevMem = await storeC.createMember({ name: "多设备成员" });
+
+    const legacyHb = await storeC.ingestHeartbeat(legacyMem.member_token, {
+      clientVersion: "1.5.0",
+      usageEvents: [{ id: "leg:s1", modelName: "gemini-4-neon-xhigh", uncachedInputTokens: 15000, outputTokens: 1000, timestampMs: t }],
+    });
+    assert.equal(legacyHb.ok, true);
+    assert.equal(legacyHb.acceptedEvents, 1, "未升级的 v1.5.0 旧客户端必须正常接收上报");
+
+    // 3) 多设备同步状态 + confirmMemberRules 版本严格单调不回退
+    await storeC.updateSettings({ pool_reserve_floor_pct: 15 }); // v2
+    await storeC.updateSettings({ pool_reserve_floor_pct: 20 }); // v3
+    const confV3 = await storeC.confirmMemberRules(multiDevMem.member_token, 3);
+    assert.equal(confV3.acceptedRuleVersion, 3);
+    const confOldV2 = await storeC.confirmMemberRules(multiDevMem.member_token, 2);
+    assert.equal(confOldV2.acceptedRuleVersion, 3, "旧设备提交 v2 确认绝不得把已确认的 v3 回退");
+
+    await storeC.ingestHeartbeat(multiDevMem.member_token, {
+      clientVersion: "1.6.0",
+      deviceId: "dev_aaa111222333",
+      accountHash: engineAccountHash("multi@gmail.com"),
+      collectionStatus: "active",
+    });
+    await storeC.ingestHeartbeat(multiDevMem.member_token, {
+      clientVersion: "1.6.0",
+      deviceId: "dev_bbb444555666",
+      accountHash: engineAccountHash("other@gmail.com"),
+      collectionStatus: "paused_account_mismatch",
+    });
+
+    const dashC = await storeC.getAdminDashboard(t);
+    assert.equal(dashC.members.find((m) => m.id === legacyMem.id).isLegacyClient, true);
+    const mMulti = dashC.members.find((m) => m.id === multiDevMem.id);
+    assert.equal(mMulti.acceptedRuleVersion, 3);
+    assert.equal(mMulti.onlineDeviceCount, 2, "应准确汇总同一成员的 2 台在线匿名设备");
+    assert.equal(mMulti.devices.length, 2);
+
+    // 4) 静态隐私与零子进程红线扫描（成员插件运行时绝不含 child_process / execFile / spawn / reg.exe / 凭据库读取）
+    const pluginFiles = [
+      path.join(PROJECT_ROOT, "member-plugin", "sidecars", "ledger", "collector.mjs"),
+      path.join(PROJECT_ROOT, "member-plugin", "sidecars", "ledger", "main.mjs"),
+      path.join(PROJECT_ROOT, "member-plugin", "sidecars", "ledger", "update-service.mjs"),
+    ];
+    for (const fp of pluginFiles) {
+      const src = fs.readFileSync(fp, "utf8");
+      assert.ok(
+        !/child_process|execFile|execSync|spawnSync|\bspawn\(|reg\.exe|CryptUnprotectData|keychain/i.test(src),
+        `${path.basename(fp)} 违反零子进程/零凭据库安全红线`
+      );
+    }
+  });
+
+  // 30 (Total 29 tests). 实机回环 GetUserStatus（userTier 优先于 planName: "Pro"）+ 非回环拦截 + 零明文邮箱返回
+  await test("collector:get-user-status-loopback-tier-priority-and-zero-plaintext-email", async () => {
+    // 拦截非回环地址
+    const blocked = await fetchLocalUserStatus({
+      ANTIGRAVITY_LS_ADDRESS: "http://192.168.1.99:9000",
+      ANTIGRAVITY_CSRF_TOKEN: "csrf_demo",
+    });
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.reason, "non_loopback_blocked");
+
+    // 真实 127.0.0.1 HTTP 回环：planName 为 'Pro' 但 userTier 为 g1-ultra-tier -> 必须识别为 'ultra'
+    const rawSecretEmail = "Ultra.Owner.Real@Gmail.com";
+    const mockLs = http.createServer((req, res) => {
+      if (req.headers["x-codeium-csrf-token"] !== "valid_csrf_123") {
+        res.writeHead(401);
+        res.end("unauthorized");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          userStatus: {
+            email: rawSecretEmail,
+            userTier: { id: "g1-ultra-tier", name: "Google AI Ultra" },
+            planStatus: { planInfo: { planName: "Pro" } },
+          },
+        })
+      );
+    });
+    await new Promise((r) => mockLs.listen(0, "127.0.0.1", r));
+    const lsPort = mockLs.address().port;
+    try {
+      const okRes = await fetchLocalUserStatus({
+        ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${lsPort}`,
+        ANTIGRAVITY_CSRF_TOKEN: "valid_csrf_123",
+      });
+      assert.equal(okRes.ok, true);
+      assert.equal(okRes.loggedIn, true);
+      assert.equal(okRes.accountTier, "ultra", "必须以 userStatus.userTier 为主判据，不能被 planName:'Pro' 误导");
+      assert.equal(okRes.accountHash, collectorAccountHash(rawSecretEmail));
+      assert.equal(okRes.accountMasked, "ult***@gmail.com");
+      assert.ok(!JSON.stringify(okRes).toLowerCase().includes(rawSecretEmail.toLowerCase()), "返回值严禁包含明文完整邮箱");
+
+      const unauthRes = await fetchLocalUserStatus({
+        ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${lsPort}`,
+        ANTIGRAVITY_CSRF_TOKEN: "wrong_csrf",
+      });
+      assert.equal(unauthRes.ok, false);
+      assert.equal(unauthRes.statusCode, 401);
+    } finally {
+      mockLs.close();
     }
   });
 

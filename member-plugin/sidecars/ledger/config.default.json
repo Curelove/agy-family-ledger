@@ -4,6 +4,10 @@
   "memberName": "",
   "proxyUrl": "",
   "syncIntervalSec": 90,
+  "boundAccountHash": "",
+  "boundAccountMasked": "",
+  "targetAccountHash": "",
+  "manualPaused": false,
   "autoCheckUpdates": true,
   "ignoredUpdateVersion": ""
 }

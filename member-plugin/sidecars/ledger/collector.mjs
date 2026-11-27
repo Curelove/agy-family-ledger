@@ -1,11 +1,13 @@
 /**
- * 成员端零隐私侵入数据采集器 (v1.4.0 · Windows / macOS / Linux 全平台零依赖)
+ * 成员端零隐私侵入数据采集器 (v1.6.0 · Windows / macOS / Linux 全平台零依赖)
  *
- * 严格隐私边界：
+ * 严格隐私与安全边界：
  * 1. 读取本机 Antigravity 会话日志 transcript.jsonl 时，仅读取顶层纯数字 Token 计数、模型名、步数索引与时间戳，
- *    绝不读取、存储或上传任何对话正文 content、思考内容 thinking 或工具调用参数 tool_calls；会话 ID 经 SHA-256 短哈希脱敏。
- * 2. 读取官方配额水位时，仅调用宿主 Sidecar 注入的 127.0.0.1 本地接口（RetrieveUserQuotaSummary）。
- * 3. 永不扫描本机进程、端口、代理配置或任何工作区文件。
+ *    绝不读取、存储或上传任何对话正文、思考过程或工具调用参数；会话 ID 经 SHA-256 短哈希脱敏。
+ * 2. 多账号识别仅调用宿主 Sidecar 注入的 127.0.0.1 本地接口（GetUserStatus），在内存中即时计算域隔离
+ *    SHA-256 短指纹（20 位 hex）与本地脱敏展示串（如 ali***@example.com），明文完整邮箱绝不落盘、绝不上传。
+ * 3. 读取官方配额水位时，仅调用宿主 127.0.0.1 本地接口（RetrieveUserQuotaSummary），且仅在账号校验通过时上报。
+ * 4. 零外部子进程调用，永不扫描本机进程、端口、注册表、凭据库、代理配置或任何工作区文件。
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -14,11 +16,23 @@ import http from "node:http";
 import tls from "node:tls";
 import crypto from "node:crypto";
 
-const CLIENT_VERSION = "1.5.0";
+export const CLIENT_VERSION = "1.6.0";
 const MAX_PENDING_QUEUE = 1500;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES_PER_POLL = 8 * 1024 * 1024;
 const MAX_TRACKED_FILES = 2000;
+const DISABLED_GAP_MS = 45_000;
+const BOOT_GRACE_MS = 15_000;
+const LS_SELF_HEAL_COOLDOWN_MS = 10 * 60 * 1000;
+
+export const COLLECTION_STATES = {
+  UNBOUND: "UNBOUND",
+  ACTIVE_MATCH: "ACTIVE_MATCH",
+  PAUSED_ACCOUNT_MISMATCH: "PAUSED_ACCOUNT_MISMATCH",
+  PAUSED_MANUAL: "PAUSED_MANUAL",
+  PAUSED_IDENTITY_UNAVAILABLE: "PAUSED_IDENTITY_UNAVAILABLE",
+  BLOCKED_BY_SERVER: "BLOCKED_BY_SERVER",
+};
 
 function isLoopbackHost(hostname = "") {
   const h = String(hostname || "").toLowerCase();
@@ -49,6 +63,37 @@ function sanitizeUsageRuleNote(note = "") {
     .replace(/\s{2,}/g, " ")
     .trim()
     .slice(0, 180);
+}
+
+/**
+ * 账号域隔离短指纹：sha256("agy-family-ledger:acct:v1:" + email.trim().toLowerCase()).slice(0, 20)
+ */
+export function computeAccountFingerprint(rawEmail = "") {
+  const clean = String(rawEmail || "").trim().toLowerCase();
+  if (!clean || !clean.includes("@")) return "";
+  return crypto
+    .createHash("sha256")
+    .update(`agy-family-ledger:acct:v1:${clean}`, "utf8")
+    .digest("hex")
+    .slice(0, 20);
+}
+
+export function normalizeAccountHash(raw = "") {
+  const clean = String(raw || "").trim().toLowerCase();
+  return /^[0-9a-f]{20}$/.test(clean) ? clean : "";
+}
+
+/**
+ * 本地界面脱敏邮箱显示（如 alice.demo@example.com -> ali***@example.com），严禁上传云端
+ */
+export function maskEmailForLocalDisplay(rawEmail = "") {
+  const clean = String(rawEmail || "").trim().toLowerCase();
+  const atIdx = clean.lastIndexOf("@");
+  if (atIdx <= 0 || atIdx >= clean.length - 1) return "";
+  const localPart = clean.slice(0, atIdx);
+  const domain = clean.slice(atIdx + 1);
+  const prefix = localPart.length <= 2 ? localPart.slice(0, 1) : localPart.slice(0, 3);
+  return `${prefix}***@${domain}`;
 }
 
 export function computeRuleNoteHash(note = "") {
@@ -100,8 +145,8 @@ export function formatAgreedRuleSummary(rules) {
 }
 
 /**
- * 构造含初始规则与全组使用约定的纯文本绑定码：
- * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>[&rf=<floor>&mc=<cap>&ao=<1|0>&r3p=<1>&nh=<hash>]
+ * 构造含初始规则、全组使用约定与可选账号锁指纹的纯文本绑定码：
+ * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>[&rf=<floor>&mc=<cap>&ao=<1|0>&r3p=<1>&nh=<hash>][&ah=<20hex>]
  */
 export function buildInviteCode({
   serverUrl = "",
@@ -115,6 +160,7 @@ export function buildInviteCode({
   applyCapToOwner = true,
   restrict3pForMembers = false,
   usageRuleNote = "",
+  targetAccountHash = "",
 } = {}) {
   const cleanUrl = String(serverUrl || "").trim().replace(/\/+$/, "");
   const cleanToken = String(memberToken || "").trim();
@@ -127,6 +173,7 @@ export function buildInviteCode({
   const ao = applyCapToOwner === false ? 0 : 1;
   const r3p = restrict3pForMembers ? 1 : 0;
   const nh = computeRuleNoteHash(usageRuleNote);
+  const ah = normalizeAccountHash(targetAccountHash);
 
   let frag = `${cleanToken}&v=${v}&m=${modeShort}&g=${g}&p=${p}`;
   if (rf > 0 || mc > 0 || ao === 0 || r3p === 1 || nh) {
@@ -134,11 +181,14 @@ export function buildInviteCode({
     if (r3p === 1) frag += `&r3p=1`;
     if (nh) frag += `&nh=${nh}`;
   }
+  if (ah) {
+    frag += `&ah=${ah}`;
+  }
   return `${cleanUrl}#${frag}`;
 }
 
 /**
- * 解析单行纯文本绑定码（兼容旧版 https://域名#agf_xxxx、v1.2.0 与 v1.3.0 含使用约定后缀）
+ * 解析单行纯文本绑定码（兼容旧版 https://域名#agf_xxxx、v1.2~v1.5 规则锁定与 v1.6 &ah= 账号指纹锁）
  * 安全约束：公网地址强制要求 https://，拦截私网 LAN 与非 loopback 的明文 http://
  */
 export function parseInviteCode(raw = "") {
@@ -175,8 +225,13 @@ export function parseInviteCode(raw = "") {
   }
 
   let agreedRules = null;
+  let targetAccountHash = "";
   if (extraFrag && extraFrag.includes("=")) {
     const params = new URLSearchParams(extraFrag.replace(/^[&?]+/, ""));
+    const rawAh = params.get("ah");
+    if (rawAh) {
+      targetAccountHash = normalizeAccountHash(rawAh);
+    }
     const rawV = Number(params.get("v"));
     const rawM = params.get("m");
     const rawG = Number(params.get("g"));
@@ -209,6 +264,7 @@ export function parseInviteCode(raw = "") {
     serverUrl: rawServerUrl,
     memberToken,
     agreedRules,
+    targetAccountHash,
   };
 }
 
@@ -276,18 +332,44 @@ export function evaluateRuleMismatch(agreedRules, memberView) {
   return { mismatch: false };
 }
 
-export function getDefaultStatePath() {
-  return path.join(os.homedir(), ".gemini", "agy-family-ledger-member-state.json");
+export function getDefaultStatePath(env = process.env) {
+  const geminiDir = String(env?.ANTIGRAVITY_GEMINI_DIR || "").trim() || path.join(os.homedir(), ".gemini");
+  return path.join(geminiDir, "agy-family-ledger-member-state.json");
 }
 
-function getDefaultTranscriptRoots() {
+function normalizeRootKey(p) {
+  const resolved = path.resolve(String(p || ""));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * 默认会话日志根目录：覆盖 antigravity/brain、antigravity-ide/brain 与 antigravity-cli/brain
+ * 优先尊重 ANTIGRAVITY_GEMINI_DIR 与 ANTIGRAVITY_APP_DATA_DIR，支持隔离目录运行。
+ */
+export function getDefaultTranscriptRoots(env = process.env) {
   const home = os.homedir();
-  const baseDot = ".gemini";
-  const subDir = "brain";
-  return [
-    path.join(home, baseDot, "antigravity", subDir),
-    path.join(home, baseDot, "antigravity-ide", subDir),
-  ];
+  const geminiDir = String(env?.ANTIGRAVITY_GEMINI_DIR || "").trim() || path.join(home, ".gemini");
+  const appDataDir = String(env?.ANTIGRAVITY_APP_DATA_DIR || "").trim();
+  const candidates = [];
+  if (appDataDir) {
+    candidates.push(path.join(appDataDir, "brain"));
+  }
+  candidates.push(
+    path.join(geminiDir, "antigravity", "brain"),
+    path.join(geminiDir, "antigravity-ide", "brain"),
+    path.join(geminiDir, "antigravity-cli", "brain")
+  );
+  const seen = new Set();
+  const out = [];
+  for (const p of candidates) {
+    const resolved = path.resolve(p);
+    const key = normalizeRootKey(resolved);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(resolved);
+    }
+  }
+  return out;
 }
 
 function readJsonSafe(filePath, fallback) {
@@ -302,7 +384,7 @@ function readJsonSafe(filePath, fallback) {
 
 function writeJsonAtomic(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
   try {
     fs.renameSync(tmp, filePath);
@@ -317,10 +399,14 @@ function writeJsonAtomic(filePath, data) {
 export function classifyModelPool(modelName = "") {
   const s = String(modelName || "").trim().toLowerCase();
   if (!s) return "gemini";
-  if (/gemini|gemma|\bneon\b|\bcarbon\b|\bhydrogen\b|\bargon\b|\bflash\b/.test(s)) {
+  if (/gemini|gemma|(?:^|[^a-z0-9])(neon|carbon|hydrogen|argon|flash|orchestrator)(?:$|[^a-z0-9])/.test(s)) {
     return "gemini";
   }
-  if (/claude|opus|sonnet|haiku|anthropic|gpt|openai|\bo1\b|\bo3\b|\bo4\b|deepseek|qwen|llama|mistral|^3p/.test(s)) {
+  if (
+    /claude|opus|sonnet|haiku|anthropic|gpt[-_]?oss|gpt|openai|(?:^|[^a-z0-9])(o1|o3|o4)(?:$|[^a-z0-9])|deepseek|qwen|llama|mistral|^3p/.test(
+      s
+    )
+  ) {
     return "3p";
   }
   return "3p";
@@ -331,10 +417,11 @@ function hashConvId(convId = "") {
 }
 
 /**
- * 提取单行 PLANNER_RESPONSE 的纯数值计量字段（严格只读取顶层数字与模型名，不访问 content / thinking / tool_calls）
- * 注：在 Antigravity 原生日志中，input_tokens 本身就是不含缓存的新增未缓存输入 Token，与 cache_read_tokens 互斥。
+ * 提取单行 PLANNER_RESPONSE 的纯数值计量字段（严格只读取顶层数字、模型名、步数与时间戳）
+ * - 精确区分合法 step_index（含 0）与缺失 undefined，结合零正文特征摘要 sig8（及缺失步数时的 lineOffset）生成幂等唯一 ID，
+ *   彻底解决同会话回退重试产生重复 step_index 丢步与缺失 step_index 全部退化为 :s0 碰撞的问题。
  */
-export function extractNumericUsageFromLine(line = "", convId = "") {
+export function extractNumericUsageFromLine(line = "", convId = "", { lineOffset = 0 } = {}) {
   if (!line || !line.includes('"PLANNER_RESPONSE"')) return null;
 
   let obj;
@@ -354,7 +441,13 @@ export function extractNumericUsageFromLine(line = "", convId = "") {
     return Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
   };
 
-  const stepIndex = numVal("step_index");
+  const rawIdx = obj.step_index !== undefined ? obj.step_index : meta.step_index;
+  const hasStepIdx =
+    (typeof rawIdx === "number" || (typeof rawIdx === "string" && /^\d+$/.test(rawIdx))) &&
+    Number.isSafeInteger(Number(rawIdx)) &&
+    Number(rawIdx) >= 0;
+  const stepIndex = hasStepIdx ? Number(rawIdx) : null;
+
   const modelName = String(obj.model || meta.model || "").trim().slice(0, 80);
   const createdAt = typeof obj.created_at === "string" ? obj.created_at : "";
   const inputTokens = numVal("input_tokens");
@@ -369,9 +462,13 @@ export function extractNumericUsageFromLine(line = "", convId = "") {
   }
   const tsMs = createdAt ? Date.parse(createdAt) : Date.now();
   const shortHash = hashConvId(convId);
+  const safeOffset = Number.isFinite(Number(lineOffset)) && Number(lineOffset) >= 0 ? Math.floor(Number(lineOffset)) : 0;
+  const sigInput = `${createdAt}|${inputTokens}|${cacheReadTokens}|${cacheWriteTokens}|${outputTokens}|${modelName}|${hasStepIdx ? "" : safeOffset}`;
+  const sig8 = crypto.createHash("sha256").update(sigInput, "utf8").digest("hex").slice(0, 8);
+  const id = hasStepIdx ? `${shortHash}:s${stepIndex}:${sig8}` : `${shortHash}:ns:${sig8}`;
 
   return {
-    id: `${shortHash}:s${stepIndex}`,
+    id,
     poolKey: classifyModelPool(modelName),
     modelName,
     requestCount: 1,
@@ -384,7 +481,7 @@ export function extractNumericUsageFromLine(line = "", convId = "") {
 }
 
 /**
- * 读取 transcript 文件首行时间戳（用于区分「安装前历史老对话」与「安装后新建对话/子代理」）
+ * 读取 transcript 文件首行时间戳（用于区分「游标之前历史老对话」与「恢复后新建对话/子代理」）
  */
 function peekConversationStartMs(logPath, stat) {
   let fd = null;
@@ -413,17 +510,101 @@ function peekConversationStartMs(logPath, stat) {
   return stat.mtimeMs;
 }
 
+function inferKnownRootsFromOffsets(fileOffsets = {}) {
+  const roots = new Set();
+  for (const key of Object.keys(fileOffsets || {})) {
+    const idx = key.indexOf(`${path.sep}.system_generated${path.sep}`);
+    const altIdx = idx >= 0 ? idx : key.indexOf("/.system_generated/");
+    if (altIdx > 0) {
+      const convDir = key.slice(0, altIdx);
+      const rootDir = path.dirname(convDir);
+      if (rootDir) roots.add(normalizeRootKey(rootDir));
+    }
+  }
+  return Array.from(roots);
+}
+
+function trimTrackedFileOffsets(stateObj) {
+  const keys = Object.keys(stateObj.fileOffsets || {});
+  if (keys.length > MAX_TRACKED_FILES) {
+    for (const k of keys.slice(0, keys.length - Math.floor(MAX_TRACKED_FILES * 0.8))) {
+      delete stateObj.fileOffsets[k];
+    }
+  }
+}
+
+/**
+ * 静默快进所有活跃 transcript.jsonl 游标至当前文件末尾（st.size），绝不产生任何入队事件。
+ * 用于非 ACTIVE_MATCH 暂停态持续快进、切回激活态前清尾、停摆窗口锚定与升级新增目录锚定。
+ */
+export function fastForwardTranscriptOffsets(
+  stateObj = {},
+  transcriptRoots = null,
+  { nowMs = Date.now(), anchorBeforeMs = null, onlyUntracked = false, env = process.env } = {}
+) {
+  const dirs = Array.isArray(transcriptRoots) ? transcriptRoots : getDefaultTranscriptRoots(env);
+  if (!stateObj.fileOffsets || typeof stateObj.fileOffsets !== "object") {
+    stateObj.fileOffsets = {};
+  }
+  if (!Array.isArray(stateObj.knownRoots)) {
+    stateObj.knownRoots = inferKnownRootsFromOffsets(stateObj.fileOffsets);
+  }
+  const knownSet = new Set(stateObj.knownRoots.map(normalizeRootKey));
+  const cutoffMs = nowMs - 48 * 3600 * 1000;
+  let anchoredCount = 0;
+
+  for (const root of dirs) {
+    const rootKey = normalizeRootKey(root);
+    if (!knownSet.has(rootKey)) {
+      knownSet.add(rootKey);
+      stateObj.knownRoots.push(rootKey);
+    }
+    if (!fs.existsSync(root)) continue;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue;
+      const logPath = path.join(root, ent.name, ".system_generated", "logs", "transcript.jsonl");
+      let st;
+      try {
+        st = fs.statSync(logPath);
+      } catch {
+        continue;
+      }
+      if (!st.isFile() || st.mtimeMs < cutoffMs) continue;
+      const key = logPath.toLowerCase();
+      if (onlyUntracked && key in stateObj.fileOffsets) continue;
+      if (anchorBeforeMs !== null) {
+        const effectiveActivityMs =
+          st.mtimeMs <= nowMs + 60_000 ? st.mtimeMs : peekConversationStartMs(logPath, st);
+        if (effectiveActivityMs >= anchorBeforeMs) continue;
+      }
+      stateObj.fileOffsets[key] = st.size;
+      anchoredCount++;
+    }
+  }
+
+  trimTrackedFileOffsets(stateObj);
+  return anchoredCount;
+}
+
 /**
  * 增量扫描本机 Antigravity 的 transcript.jsonl：
- * - 首次建档记录 installedAtMs：安装前已存在的旧对话锚定在末尾不翻旧账；
- * - 安装后新开的对话与子代理（首行时间 >= installedAtMs - 5s）从 offset=0 完整读取，不再漏计首轮消耗；
- * - 流式扫描 0x0A 换行字节，遇到单行超 4MB 的巨型行自动跳过并推进游标，永不卡死。
+ * - 首次建档记录 installedAtMs / collectionCursorMs，旧对话锚定末尾不翻旧账；
+ * - 升级后首次新增挂载的目录（不在 state.knownRoots 内），其下已有历史文件自动锚定至 st.size 不翻旧账；
+ * - 新建对话与子代理（首行时间 >= cursorMs - 5s）从 offset=0 完整读取首轮与后续步骤；
+ * - 流式扫描 0x0A 换行字节并精确记录每行起始字节偏移 lineStartPos，遇超 4MB 单行自动跳过不卡死。
  */
-export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = null, { nowMs = Date.now() } = {}) {
-  const dirs =
-    Array.isArray(transcriptRoots) && transcriptRoots.length
-      ? transcriptRoots
-      : getDefaultTranscriptRoots();
+export function scanIncrementalTranscriptUsage(
+  stateObj = {},
+  transcriptRoots = null,
+  { nowMs = Date.now(), env = process.env } = {}
+) {
+  const dirs = Array.isArray(transcriptRoots) ? transcriptRoots : getDefaultTranscriptRoots(env);
 
   if (!stateObj.fileOffsets || typeof stateObj.fileOffsets !== "object") {
     stateObj.fileOffsets = {};
@@ -431,11 +612,32 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
   if (!Number.isFinite(Number(stateObj.installedAtMs)) || Number(stateObj.installedAtMs) <= 0) {
     stateObj.installedAtMs = nowMs;
   }
-  const installedAtMs = Number(stateObj.installedAtMs);
+
+  const hasExistingOffsets = Object.keys(stateObj.fileOffsets).length > 0;
+  if (!Array.isArray(stateObj.knownRoots)) {
+    if (hasExistingOffsets) {
+      stateObj.knownRoots = inferKnownRootsFromOffsets(stateObj.fileOffsets);
+    } else {
+      stateObj.knownRoots = dirs.map(normalizeRootKey);
+    }
+  }
+  const knownSet = new Set(stateObj.knownRoots.map(normalizeRootKey));
+
+  const cursorMs = Math.max(
+    Number(stateObj.installedAtMs) || 0,
+    Number(stateObj.collectionCursorMs) || 0
+  );
   const cutoffMs = nowMs - 48 * 3600 * 1000;
   const freshEvents = [];
 
   for (const root of dirs) {
+    const rootKey = normalizeRootKey(root);
+    const isNewlyMountedRoot = !knownSet.has(rootKey);
+    if (isNewlyMountedRoot) {
+      knownSet.add(rootKey);
+      stateObj.knownRoots.push(rootKey);
+    }
+
     if (!fs.existsSync(root)) continue;
     let entries = [];
     try {
@@ -459,19 +661,21 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
       const key = logPath.toLowerCase();
       let offset;
       if (!(key in stateObj.fileOffsets)) {
+        if (isNewlyMountedRoot) {
+          // 升级后首次挂载的新目录（如 antigravity-cli/brain）：已有历史文件统一锚定末尾不翻旧账
+          stateObj.fileOffsets[key] = st.size;
+          continue;
+        }
         const startMs = peekConversationStartMs(logPath, st);
-        if (startMs >= installedAtMs - 5000) {
-          // 安装之后新建的对话或子代理：从 0 字节开始完整读取首轮与后续步骤
+        if (startMs >= cursorMs - 5000) {
           offset = 0;
           stateObj.fileOffsets[key] = 0;
         } else {
-          // 安装之前已存在的历史老对话：锚定在当前文件末尾，仅追踪未来新增
           stateObj.fileOffsets[key] = st.size;
           continue;
         }
       } else {
         offset = Number(stateObj.fileOffsets[key] || 0);
-        // 刷新 LRU 顺序，避免活跃旧对话被过早淘汰
         delete stateObj.fileOffsets[key];
         stateObj.fileOffsets[key] = offset;
       }
@@ -483,6 +687,7 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
       try {
         fd = fs.openSync(logPath, "r");
         let curPos = offset;
+        let lineStartPos = offset;
         let scannedBytes = 0;
         const chunkBuf = Buffer.allocUnsafe(256 * 1024);
         let carryChunks = [];
@@ -507,7 +712,7 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
                 const segBuf = Buffer.from(chunkBuf.subarray(sliceStart, i));
                 const fullBuf = carryChunks.length ? Buffer.concat([...carryChunks, segBuf]) : segBuf;
                 const lineStr = fullBuf.toString("utf8").replace(/\r$/, "");
-                const ev = extractNumericUsageFromLine(lineStr, convId);
+                const ev = extractNumericUsageFromLine(lineStr, convId, { lineOffset: lineStartPos });
                 if (ev) freshEvents.push(ev);
                 carryChunks = [];
                 carryLen = 0;
@@ -516,6 +721,7 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
                 carryLen = 0;
               }
               stateObj.fileOffsets[key] = lineEndPos;
+              lineStartPos = lineEndPos;
               sliceStart = i + 1;
             }
           }
@@ -524,7 +730,6 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
             const remLen = bytesRead - sliceStart;
             if (!skippingOversized) {
               if (carryLen + remLen > MAX_LINE_BYTES) {
-                // 单行超过 4MB：切换跳过模式直到遇到下一个换行符，绝不永久阻塞游标
                 skippingOversized = true;
                 carryChunks = [];
                 carryLen = 0;
@@ -538,7 +743,6 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
           curPos += bytesRead;
           scannedBytes += bytesRead;
           if (skippingOversized && curPos < st.size) {
-            // 若在跳过超大行中途达到本次扫描上限，记录进度下次接着跳过
             stateObj.fileOffsets[key] = curPos;
           }
         }
@@ -554,18 +758,13 @@ export function scanIncrementalTranscriptUsage(stateObj = {}, transcriptRoots = 
     }
   }
 
-  const keys = Object.keys(stateObj.fileOffsets);
-  if (keys.length > MAX_TRACKED_FILES) {
-    for (const k of keys.slice(0, keys.length - Math.floor(MAX_TRACKED_FILES * 0.8))) {
-      delete stateObj.fileOffsets[k];
-    }
-  }
-
+  trimTrackedFileOffsets(stateObj);
   return freshEvents;
 }
 
 /**
- * 归一化官方 RetrieveUserQuotaSummary 响应 -> [{ poolKey, windowKey, remainingPct, resetAt, capturedAtMs }]
+ * 归一化官方 RetrieveUserQuotaSummary 响应：
+ * 返回 { snapshots: Array<{ poolKey, windowKey, remainingPct, resetAt, capturedAtMs }>, hasSeparateArgonPool: boolean }
  */
 export function parseQuotaSummaryResponse(resp, nowMs = Date.now()) {
   const root = resp?.response && typeof resp.response === "object" ? resp.response : resp || {};
@@ -584,12 +783,19 @@ export function parseQuotaSummaryResponse(resp, nowMs = Date.now()) {
     }
   }
 
-  const out = [];
+  const snapshots = [];
   const seen = new Set();
+  let hasSeparateArgonPool = false;
+
   for (const b of buckets) {
     if (b.disabled === true) continue;
     const rawId = String(b.bucketId || "").toLowerCase();
     const gName = String(b._groupName || b.displayName || "").toLowerCase();
+    if (rawId.includes("argon")) {
+      hasSeparateArgonPool = true;
+      continue;
+    }
+
     const windowKey =
       b.window === "5h" || b.window === "weekly"
         ? b.window
@@ -600,7 +806,6 @@ export function parseQuotaSummaryResponse(resp, nowMs = Date.now()) {
         : "";
     if (!windowKey) continue;
 
-    if (rawId.includes("argon")) continue;
     const poolKey = /claude|3p|third|anthropic|openai|gpt/.test(`${rawId} ${gName}`) ? "3p" : "gemini";
     const fracRaw =
       b.remainingFraction !== undefined
@@ -613,7 +818,7 @@ export function parseQuotaSummaryResponse(resp, nowMs = Date.now()) {
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);
 
-    out.push({
+    snapshots.push({
       poolKey,
       windowKey,
       remainingPct: Math.round(frac * 10000) / 100,
@@ -621,50 +826,47 @@ export function parseQuotaSummaryResponse(resp, nowMs = Date.now()) {
       capturedAtMs: nowMs,
     });
   }
-  return out;
+  return { snapshots, hasSeparateArgonPool };
 }
 
-/**
- * 通过官方 Sidecar 注入的 127.0.0.1 环境变量只读拉取当前配额水位（零进程扫描、跨平台兼容）
- */
-export async function fetchLocalQuotaSnapshots(env = process.env) {
-  const rawAddr = String(env.ANTIGRAVITY_LS_ADDRESS || "").trim();
-  const csrf = String(env.ANTIGRAVITY_CSRF_TOKEN || "").trim();
+function parseLoopbackLsEndpoint(env = process.env) {
+  const rawAddr = String(env?.ANTIGRAVITY_LS_ADDRESS || "").trim();
+  const csrf = String(env?.ANTIGRAVITY_CSRF_TOKEN || "").trim();
   if (!rawAddr || !csrf) {
-    return { ok: false, reason: "sidecar_env_unavailable", snapshots: [] };
+    return { ok: false, reason: "sidecar_env_unavailable" };
   }
-
-  let host = "127.0.0.1";
   let port = 0;
   try {
     const parsed = new URL(/^[a-z]+:\/\//i.test(rawAddr) ? rawAddr : `http://${rawAddr}`);
     if (!isLoopbackHost(parsed.hostname)) {
-      return { ok: false, reason: "non_loopback_blocked", snapshots: [] };
+      return { ok: false, reason: "non_loopback_blocked" };
     }
-    host = "127.0.0.1";
     port = Number(parsed.port);
   } catch {
-    return { ok: false, reason: "invalid_ls_address", snapshots: [] };
+    return { ok: false, reason: "invalid_ls_address" };
   }
   if (!Number.isInteger(port) || port <= 0) {
-    return { ok: false, reason: "invalid_ls_port", snapshots: [] };
+    return { ok: false, reason: "invalid_ls_port" };
   }
+  return { ok: true, host: "127.0.0.1", port, csrf };
+}
 
+function postLocalLsRpc(endpoint, rpcPath, { timeoutMs = 5500 } = {}) {
   const body = JSON.stringify({});
-  return await new Promise((resolve) => {
+  return new Promise((resolve) => {
     const req = http.request(
       {
-        hostname: host,
-        port,
+        hostname: endpoint.host,
+        port: endpoint.port,
         method: "POST",
-        path: "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+        path: rpcPath,
         headers: {
           "Content-Type": "application/json",
           "Connect-Protocol-Version": "1",
-          "x-codeium-csrf-token": csrf,
+          "x-codeium-csrf-token": endpoint.csrf,
           "Content-Length": Buffer.byteLength(body),
         },
-        timeout: 6000,
+        timeout: timeoutMs,
       },
       (res) => {
         let chunks = "";
@@ -672,25 +874,244 @@ export async function fetchLocalQuotaSnapshots(env = process.env) {
         res.on("data", (d) => (chunks += d));
         res.on("end", () => {
           if (res.statusCode !== 200) {
-            resolve({ ok: false, reason: `http_${res.statusCode}`, snapshots: [] });
+            resolve({ ok: false, statusCode: res.statusCode || 0, code: "", reason: `http_${res.statusCode}`, data: null });
             return;
           }
           try {
             const parsed = JSON.parse(chunks || "{}");
-            resolve({ ok: true, snapshots: parseQuotaSummaryResponse(parsed, Date.now()) });
+            resolve({ ok: true, statusCode: 200, code: "", reason: "", data: parsed });
           } catch {
-            resolve({ ok: false, reason: "parse_error", snapshots: [] });
+            resolve({ ok: false, statusCode: 200, code: "", reason: "parse_error", data: null });
           }
         });
       }
     );
-    req.on("error", (err) => resolve({ ok: false, reason: err.message, snapshots: [] }));
+    req.on("error", (err) =>
+      resolve({ ok: false, statusCode: 0, code: String(err?.code || ""), reason: err?.code || err?.message || "rpc_error", data: null })
+    );
     req.on("timeout", () => {
       req.destroy();
-      resolve({ ok: false, reason: "timeout", snapshots: [] });
+      resolve({ ok: false, statusCode: 0, code: "ETIMEDOUT", reason: "timeout", data: null });
     });
     req.end(body);
   });
+}
+
+function extractAccountTierFromUserStatus(us = {}) {
+  const tierObj = us?.userTier && typeof us.userTier === "object" ? us.userTier : {};
+  const tierStr = `${tierObj.id || ""} ${tierObj.name || ""} ${typeof us?.userTier === "string" ? us.userTier : ""}`.toLowerCase();
+  if (tierStr.includes("ultra")) return "ultra";
+  if (tierStr.includes("pro")) return "pro";
+  if (tierStr.includes("free") || tierStr.includes("individual") || tierStr.includes("standard")) return "free";
+
+  const planStr = `${us?.planStatus?.planInfo?.planName || ""} ${us?.planStatus?.planInfo?.teamsTier || ""}`.toLowerCase();
+  if (planStr.includes("ultra")) return "ultra";
+  if (planStr.includes("pro")) return "pro";
+  if (planStr.includes("free")) return "free";
+  return "";
+}
+
+/**
+ * 通过官方 Sidecar 注入的 127.0.0.1 本地接口读取当前登录账号身份（纯内存即时哈希与脱敏，绝不返回明文邮箱）
+ */
+export async function fetchLocalUserStatus(env = process.env) {
+  const ep = parseLoopbackLsEndpoint(env);
+  if (!ep.ok) {
+    return {
+      ok: false,
+      statusCode: 0,
+      code: "",
+      reason: ep.reason,
+      loggedIn: false,
+      accountHash: "",
+      accountMasked: "",
+      accountTier: "",
+    };
+  }
+  const rpc = await postLocalLsRpc(ep, "/exa.language_server_pb.LanguageServerService/GetUserStatus", {
+    timeoutMs: 5000,
+  });
+  if (!rpc.ok) {
+    return {
+      ok: false,
+      statusCode: rpc.statusCode,
+      code: rpc.code,
+      reason: rpc.reason,
+      loggedIn: false,
+      accountHash: "",
+      accountMasked: "",
+      accountTier: "",
+    };
+  }
+
+  const root = rpc.data && typeof rpc.data === "object" ? rpc.data : {};
+  const us = root.userStatus || root.response?.userStatus || root || {};
+  const rawEmail = String(us.email || us.userEmail || "").trim();
+  const accountHash = computeAccountFingerprint(rawEmail);
+  const accountMasked = maskEmailForLocalDisplay(rawEmail);
+  const accountTier = extractAccountTierFromUserStatus(us);
+
+  return {
+    ok: true,
+    statusCode: 200,
+    code: "",
+    reason: "",
+    loggedIn: Boolean(accountHash),
+    accountHash,
+    accountMasked,
+    accountTier,
+  };
+}
+
+/**
+ * 通过官方 Sidecar 注入的 127.0.0.1 环境变量只读拉取当前配额水位（零进程扫描、跨平台兼容）
+ */
+export async function fetchLocalQuotaSnapshots(env = process.env) {
+  const ep = parseLoopbackLsEndpoint(env);
+  if (!ep.ok) {
+    return { ok: false, statusCode: 0, code: "", reason: ep.reason, snapshots: [], hasSeparateArgonPool: false };
+  }
+  const rpc = await postLocalLsRpc(ep, "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary", {
+    timeoutMs: 6000,
+  });
+  if (!rpc.ok) {
+    return {
+      ok: false,
+      statusCode: rpc.statusCode,
+      code: rpc.code,
+      reason: rpc.reason,
+      snapshots: [],
+      hasSeparateArgonPool: false,
+    };
+  }
+  const parsed = parseQuotaSummaryResponse(rpc.data, Date.now());
+  return {
+    ok: true,
+    statusCode: 200,
+    code: "",
+    reason: "",
+    snapshots: parsed.snapshots,
+    hasSeparateArgonPool: parsed.hasSeparateArgonPool,
+  };
+}
+
+/**
+ * 纯文件系统单实例租约锁（零子进程、零强杀外部进程）：
+ * 新 Sidecar 启动声明所有权后，旧残留实例通过 fs.watch 或定时复核发现失锁后立即自行停表退出。
+ */
+export class SidecarLease {
+  constructor({ leasePath = "", dataDir = "", env = process.env, pollIntervalMs = 5000 } = {}) {
+    const baseDir =
+      dataDir ||
+      String(env?.ANTIGRAVITY_EXECUTABLE_DATA_DIR || "").trim() ||
+      path.join(os.homedir(), ".gemini", "antigravity", "sidecar_data", "agy-family-ledger", "ledger", "data");
+    this.leasePath = leasePath || path.join(baseDir, "active-sidecar.json");
+    this.pollIntervalMs = Math.max(500, Number(pollIntervalMs) || 5000);
+    this.token = "";
+    this._lost = false;
+    this._lostNotified = false;
+    this._watcher = null;
+    this._timer = null;
+    this._onLostCallbacks = [];
+  }
+
+  acquire() {
+    this.token = crypto.randomBytes(12).toString("hex");
+    this._lost = false;
+    this._lostNotified = false;
+    writeJsonAtomic(this.leasePath, {
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      token: this.token,
+    });
+    return this.token;
+  }
+
+  _emitLostOnce() {
+    if (this._lostNotified) return;
+    this._lost = true;
+    this._lostNotified = true;
+    const cbs = this._onLostCallbacks.splice(0);
+    this.stop();
+    for (const fn of cbs) {
+      try {
+        fn();
+      } catch {}
+    }
+  }
+
+  isOwner() {
+    if (!this.token) return false;
+    if (this._lost) {
+      if (!this._lostNotified && this._onLostCallbacks.length > 0) this._emitLostOnce();
+      return false;
+    }
+    try {
+      if (!fs.existsSync(this.leasePath)) {
+        this._emitLostOnce();
+        return false;
+      }
+      const raw = fs.readFileSync(this.leasePath, "utf8").replace(/^\uFEFF/, "");
+      if (!raw.trim()) return true;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.token === "string" && parsed.token !== this.token) {
+        this._emitLostOnce();
+        return false;
+      }
+      return parsed?.token === this.token;
+    } catch {
+      // 短暂文件重命名抖动时不误杀，下一轮复核
+      return !this._lost;
+    }
+  }
+
+  _notifyLostIfNeeded() {
+    if (!this.token || this._lostNotified) return;
+    if (this._lost || !this.isOwner()) {
+      this._emitLostOnce();
+    }
+  }
+
+  watchOwnership(onLost) {
+    if (typeof onLost === "function") {
+      this._onLostCallbacks.push(onLost);
+    }
+    if (this._lost) {
+      this._emitLostOnce();
+      return;
+    }
+    if (!this._watcher) {
+      try {
+        fs.mkdirSync(path.dirname(this.leasePath), { recursive: true });
+        this._watcher = fs.watch(path.dirname(this.leasePath), (_evt, filename) => {
+          if (!filename || String(filename).includes(path.basename(this.leasePath))) {
+            this._notifyLostIfNeeded();
+          }
+        });
+        if (typeof this._watcher.unref === "function") this._watcher.unref();
+        this._watcher.on("error", () => {});
+      } catch {
+        this._watcher = null;
+      }
+    }
+    if (!this._timer) {
+      this._timer = setInterval(() => this._notifyLostIfNeeded(), this.pollIntervalMs);
+      if (typeof this._timer.unref === "function") this._timer.unref();
+    }
+  }
+
+  stop() {
+    if (this._watcher) {
+      try {
+        this._watcher.close();
+      } catch {}
+      this._watcher = null;
+    }
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+  }
 }
 
 /**
@@ -829,31 +1250,158 @@ function summarizeEventForUi(ev = {}) {
   };
 }
 
+function isLsHardDisconnect(res = {}) {
+  if (!res || res.ok) return false;
+  if (Number(res.statusCode) === 401) return true;
+  if (String(res.code || "").toUpperCase() === "ECONNREFUSED") return true;
+  return /ECONNREFUSED|http_401/i.test(String(res.reason || ""));
+}
+
+function stateToClientStatus(collectionState) {
+  if (collectionState === COLLECTION_STATES.PAUSED_ACCOUNT_MISMATCH) return "paused_account_mismatch";
+  if (collectionState === COLLECTION_STATES.PAUSED_MANUAL) return "paused_manual";
+  if (collectionState === COLLECTION_STATES.PAUSED_IDENTITY_UNAVAILABLE) return "paused_identity_unavailable";
+  return "active";
+}
+
 export class MemberLedgerCollector {
-  constructor({ configPath, defaultConfigPath, statePath = getDefaultStatePath(), transcriptRoots = null }) {
+  constructor({
+    configPath,
+    defaultConfigPath,
+    statePath = null,
+    transcriptRoots = null,
+    env = process.env,
+    nowFn = () => Date.now(),
+    fetchUserStatusImpl = null,
+    fetchQuotaSnapshotsImpl = null,
+    onSelfHealRequested = null,
+    leaseCheckFn = null,
+  }) {
     this.configPath = configPath;
     this.defaultConfigPath = defaultConfigPath;
-    this.statePath = statePath;
+    this.env = env || process.env;
+    this.nowFn = typeof nowFn === "function" ? nowFn : () => Date.now();
+    this.statePath = statePath || getDefaultStatePath(this.env);
     this.transcriptRoots = transcriptRoots;
+    this.fetchUserStatusImpl = fetchUserStatusImpl;
+    this.fetchQuotaSnapshotsImpl = fetchQuotaSnapshotsImpl;
+    this.onSelfHealRequested = typeof onSelfHealRequested === "function" ? onSelfHealRequested : null;
+    this.leaseCheckFn = typeof leaseCheckFn === "function" ? leaseCheckFn : () => true;
+
+    this._bootStartMs = this.nowFn();
     this._configMtimeMs = 0;
     this._syncInFlight = null;
+    this._guardInFlight = null;
     this._isSyncing = false;
+    this._consecutiveIdentityFailures = 0;
+    this._consecutiveLsHardFailures = 0;
+    this._pendingRebindFlag = false;
+    this._lsSelfHealTriggeredThisSession = false;
+    this._currentIdentity = {
+      ok: false,
+      loggedIn: false,
+      accountHash: "",
+      accountMasked: "",
+      accountTier: "",
+      reason: "",
+    };
+
     this.config = this.loadConfig();
+    const nowMs = this.nowFn();
+    const stateExisted = fs.existsSync(this.statePath);
     this.state = readJsonSafe(this.statePath, {
-      installedAtMs: Date.now(),
+      installedAtMs: nowMs,
+      collectionCursorMs: nowMs,
+      lastWatchdogAtMs: 0,
+      lastLsSelfHealAtMs: 0,
+      deviceId: `dev_${crypto.randomBytes(6).toString("hex")}`,
+      knownRoots: null,
+      collectionState: this._isConfigured()
+        ? this.config.manualPaused
+          ? COLLECTION_STATES.PAUSED_MANUAL
+          : COLLECTION_STATES.ACTIVE_MATCH
+        : COLLECTION_STATES.UNBOUND,
       fileOffsets: {},
       pendingEvents: [],
       lastSyncedBatch: null,
       lastSyncAt: null,
       lastError: "",
+      accountBlocked: null,
+      lsConnectionIssue: null,
       lastMemberView: null,
       lastLocalSnapshots: [],
     });
+
     if (!Number.isFinite(Number(this.state.installedAtMs)) || Number(this.state.installedAtMs) <= 0) {
-      this.state.installedAtMs = Date.now();
+      this.state.installedAtMs = nowMs;
     }
-    scanIncrementalTranscriptUsage(this.state, this.transcriptRoots);
+    if (!Number.isFinite(Number(this.state.collectionCursorMs)) || Number(this.state.collectionCursorMs) <= 0) {
+      this.state.collectionCursorMs = Number(this.state.installedAtMs);
+    }
+    if (!this.state.deviceId || !/^dev_[0-9a-f]{6,24}$/i.test(String(this.state.deviceId))) {
+      this.state.deviceId = `dev_${crypto.randomBytes(6).toString("hex")}`;
+    }
+    if (!Array.isArray(this.state.pendingEvents)) {
+      this.state.pendingEvents = [];
+    }
+    if (!this.state.collectionState) {
+      this.state.collectionState = this._isConfigured()
+        ? this.config.manualPaused
+          ? COLLECTION_STATES.PAUSED_MANUAL
+          : COLLECTION_STATES.ACTIVE_MATCH
+        : COLLECTION_STATES.UNBOUND;
+    }
+
+    // 首次建档只锚定安装前历史文件，绝不在构造阶段向 pendingEvents 采集事件
+    if (!stateExisted) {
+      fastForwardTranscriptOffsets(this.state, this._resolveRoots(), {
+        nowMs,
+        anchorBeforeMs: nowMs - 5000,
+        env: this.env,
+      });
+    }
     this.saveState();
+  }
+
+  _isConfigured() {
+    return Boolean(this.config?.serverUrl && this.config?.memberToken);
+  }
+
+  _resolveRoots() {
+    return Array.isArray(this.transcriptRoots)
+      ? this.transcriptRoots
+      : getDefaultTranscriptRoots(this.env);
+  }
+
+  _computeScopeKey(activeAccountHash = "") {
+    return `${this.config.serverUrl || ""}|${this.config.memberToken || ""}|${normalizeAccountHash(activeAccountHash)}`;
+  }
+
+  _getEffectiveTargetAccountHash() {
+    const mvLock = this.state.lastMemberView?.accountLock || null;
+    if (mvLock?.isolationMode === "shared_owner_account" && normalizeAccountHash(mvLock.sharedAccountHash)) {
+      return normalizeAccountHash(mvLock.sharedAccountHash);
+    }
+    const cfgTarget = normalizeAccountHash(this.config.targetAccountHash || "");
+    if (cfgTarget) return cfgTarget;
+    if (mvLock?.lockedByAdmin && normalizeAccountHash(mvLock.boundAccountHash)) {
+      return normalizeAccountHash(mvLock.boundAccountHash);
+    }
+    const cfgBound = normalizeAccountHash(this.config.boundAccountHash || "");
+    if (cfgBound) return cfgBound;
+    if (normalizeAccountHash(mvLock?.boundAccountHash || "")) {
+      return normalizeAccountHash(mvLock.boundAccountHash);
+    }
+    return "";
+  }
+
+  _isAccountLockedByPolicy() {
+    const mvLock = this.state.lastMemberView?.accountLock || null;
+    if (mvLock?.isolationMode === "shared_owner_account" && normalizeAccountHash(mvLock.sharedAccountHash)) {
+      return true;
+    }
+    if (mvLock?.lockedByAdmin) return true;
+    return false;
   }
 
   loadConfig() {
@@ -864,6 +1412,10 @@ export class MemberLedgerCollector {
       proxyUrl: "",
       syncIntervalSec: 90,
       agreedRules: null,
+      boundAccountHash: "",
+      boundAccountMasked: "",
+      targetAccountHash: "",
+      manualPaused: false,
       autoCheckUpdates: true,
       ignoredUpdateVersion: "",
     });
@@ -874,6 +1426,10 @@ export class MemberLedgerCollector {
       this._configMtimeMs = 0;
     }
     const merged = { ...def, ...user };
+    merged.boundAccountHash = normalizeAccountHash(merged.boundAccountHash || "");
+    merged.boundAccountMasked = String(merged.boundAccountMasked || "").trim().slice(0, 80);
+    merged.targetAccountHash = normalizeAccountHash(merged.targetAccountHash || "");
+    merged.manualPaused = Boolean(merged.manualPaused);
     merged.autoCheckUpdates = merged.autoCheckUpdates !== false;
     merged.ignoredUpdateVersion = String(merged.ignoredUpdateVersion || "").trim().replace(/^v/i, "");
     return merged;
@@ -884,17 +1440,35 @@ export class MemberLedgerCollector {
       if (!fs.existsSync(this.configPath)) return false;
       const mtime = fs.statSync(this.configPath).mtimeMs;
       if (mtime && mtime !== this._configMtimeMs) {
+        const prevUrl = this.config?.serverUrl || "";
+        const prevToken = this.config?.memberToken || "";
         this.config = this.loadConfig();
+        if (this.config.serverUrl !== prevUrl || this.config.memberToken !== prevToken) {
+          this._purgeLocalQueueAndAnchor("config_reloaded");
+        }
         return true;
       }
     } catch {}
     return false;
   }
 
+  _purgeLocalQueueAndAnchor(nextState = COLLECTION_STATES.UNBOUND) {
+    const nowMs = this.nowFn();
+    this.state.pendingEvents = [];
+    this.state.lastLocalSnapshots = [];
+    this.state.collectionCursorMs = nowMs;
+    if (Object.values(COLLECTION_STATES).includes(nextState)) {
+      this.state.collectionState = nextState;
+    }
+    fastForwardTranscriptOffsets(this.state, this._resolveRoots(), { nowMs, env: this.env });
+    this.saveState();
+  }
+
   saveConfig(patch = {}) {
     let nextUrl = patch.serverUrl;
     let nextToken = patch.memberToken;
     let nextAgreed = patch.agreedRules !== undefined ? patch.agreedRules : this.config.agreedRules;
+    let parsedTargetHash = undefined;
 
     if (patch.inviteCode !== undefined && String(patch.inviteCode).trim() !== "") {
       const parsed = parseInviteCode(patch.inviteCode);
@@ -904,6 +1478,7 @@ export class MemberLedgerCollector {
       nextUrl = parsed.serverUrl;
       nextToken = parsed.memberToken;
       nextAgreed = parsed.agreedRules || null;
+      parsedTargetHash = parsed.targetAccountHash || "";
     } else if (typeof nextUrl === "string" && nextUrl.includes("#agf_")) {
       const parsed = parseInviteCode(nextUrl);
       if (!parsed.ok) {
@@ -912,6 +1487,7 @@ export class MemberLedgerCollector {
       nextUrl = parsed.serverUrl;
       nextToken = parsed.memberToken;
       if (parsed.agreedRules) nextAgreed = parsed.agreedRules;
+      parsedTargetHash = parsed.targetAccountHash || "";
     } else if (typeof nextUrl === "string" && nextUrl.trim()) {
       const check = parseInviteCode(`${nextUrl.trim().replace(/\/+$/, "")}#agf_check_only`);
       if (!check.ok) {
@@ -926,6 +1502,10 @@ export class MemberLedgerCollector {
       throw new Error("代理地址需以 http:// 或 https:// 开头（例如 http://127.0.0.1:7897）");
     }
 
+    const finalUrl = String(nextUrl ?? this.config.serverUrl ?? "").trim().replace(/\/+$/, "");
+    const finalToken = String(nextToken ?? this.config.memberToken ?? "").trim();
+    const endpointChanged = finalUrl !== (this.config.serverUrl || "") || finalToken !== (this.config.memberToken || "");
+
     const nextAutoCheck =
       patch.autoCheckUpdates !== undefined ? Boolean(patch.autoCheckUpdates) : this.config.autoCheckUpdates !== false;
     const nextIgnoredUpdate =
@@ -933,13 +1513,48 @@ export class MemberLedgerCollector {
         ? String(patch.ignoredUpdateVersion || "").trim().replace(/^v/i, "")
         : String(this.config.ignoredUpdateVersion || "").trim().replace(/^v/i, "");
 
+    let nextTargetHash =
+      parsedTargetHash !== undefined
+        ? normalizeAccountHash(parsedTargetHash)
+        : patch.targetAccountHash !== undefined
+        ? normalizeAccountHash(patch.targetAccountHash)
+        : endpointChanged
+        ? ""
+        : normalizeAccountHash(this.config.targetAccountHash || "");
+
+    let nextBoundHash =
+      patch.boundAccountHash !== undefined
+        ? normalizeAccountHash(patch.boundAccountHash)
+        : endpointChanged
+        ? ""
+        : normalizeAccountHash(this.config.boundAccountHash || "");
+
+    let nextBoundMasked =
+      patch.boundAccountMasked !== undefined
+        ? String(patch.boundAccountMasked || "").trim().slice(0, 80)
+        : endpointChanged
+        ? ""
+        : String(this.config.boundAccountMasked || "").trim().slice(0, 80);
+
+    if (nextTargetHash && nextBoundHash && nextTargetHash !== nextBoundHash) {
+      nextBoundHash = "";
+      nextBoundMasked = "";
+    }
+
+    const nextManualPaused =
+      patch.manualPaused !== undefined ? Boolean(patch.manualPaused) : Boolean(this.config.manualPaused);
+
     this.config = {
       ...this.config,
-      serverUrl: String(nextUrl ?? this.config.serverUrl ?? "").trim().replace(/\/+$/, ""),
-      memberToken: String(nextToken ?? this.config.memberToken ?? "").trim(),
+      serverUrl: finalUrl,
+      memberToken: finalToken,
       memberName: String(patch.memberName ?? this.config.memberName ?? "").trim(),
       proxyUrl: nextProxy,
       agreedRules: nextAgreed || null,
+      boundAccountHash: nextBoundHash,
+      boundAccountMasked: nextBoundMasked,
+      targetAccountHash: nextTargetHash,
+      manualPaused: nextManualPaused,
       syncIntervalSec: Math.max(30, Math.min(600, Number(patch.syncIntervalSec ?? this.config.syncIntervalSec) || 90)),
       autoCheckUpdates: nextAutoCheck,
       ignoredUpdateVersion: nextIgnoredUpdate,
@@ -948,7 +1563,74 @@ export class MemberLedgerCollector {
     try {
       this._configMtimeMs = fs.statSync(this.configPath).mtimeMs;
     } catch {}
+
+    if (endpointChanged) {
+      this.state.lastMemberView = null;
+      this.state.lastError = "";
+      this.state.accountBlocked = null;
+      this.state.lastSyncedBatch = null;
+      this._pendingRebindFlag = false;
+      this._purgeLocalQueueAndAnchor(COLLECTION_STATES.UNBOUND);
+    }
+
     return this.config;
+  }
+
+  setManualPaused(paused) {
+    const nextPaused = Boolean(paused);
+    const nowMs = this.nowFn();
+    this.saveConfig({ manualPaused: nextPaused });
+    fastForwardTranscriptOffsets(this.state, this._resolveRoots(), { nowMs, env: this.env });
+    this.state.collectionCursorMs = nowMs;
+    if (nextPaused) {
+      this.state.collectionState = COLLECTION_STATES.PAUSED_MANUAL;
+    } else if (!this._isConfigured()) {
+      this.state.collectionState = COLLECTION_STATES.UNBOUND;
+    } else {
+      // 恢复时先保持非 ACTIVE 状态，让紧接其后的 tickAccountGuard 执行「先锚定 EOF、再切入 ACTIVE_MATCH」
+      this.state.collectionState = COLLECTION_STATES.PAUSED_MANUAL;
+    }
+    this.saveState();
+    return this.getPublicState();
+  }
+
+  async rebindToCurrentAccount() {
+    this.maybeReloadConfig();
+    if (!this._isConfigured()) {
+      throw new Error("尚未连接看板");
+    }
+    if (this._isAccountLockedByPolicy()) {
+      throw new Error("当前家庭组账号归属由组长后台锁定，无法自行换绑");
+    }
+    const ls = await this._queryLocalUserStatus();
+    if (!ls.ok || !ls.loggedIn || !ls.accountHash) {
+      throw new Error("暂未检测到当前已登录的 Antigravity 账号，请稍后重试");
+    }
+    this._currentIdentity = ls;
+    const nowMs = this.nowFn();
+    this.saveConfig({
+      boundAccountHash: ls.accountHash,
+      boundAccountMasked: ls.accountMasked,
+      targetAccountHash: "",
+    });
+    this.state.pendingEvents = [];
+    this.state.lastLocalSnapshots = [];
+    this.state.collectionCursorMs = nowMs;
+    this.state.collectionState = this.config.manualPaused
+      ? COLLECTION_STATES.PAUSED_MANUAL
+      : COLLECTION_STATES.ACTIVE_MATCH;
+    fastForwardTranscriptOffsets(this.state, this._resolveRoots(), { nowMs, env: this.env });
+    this._pendingRebindFlag = true;
+    this.saveState();
+    return { ok: true, state: this.getPublicState() };
+  }
+
+  async retryIdentityCheck() {
+    this._consecutiveIdentityFailures = 0;
+    this._consecutiveLsHardFailures = 0;
+    this.state.lsConnectionIssue = null;
+    await this.tickAccountGuard();
+    return await this.syncOnce();
   }
 
   unbind() {
@@ -958,6 +1640,10 @@ export class MemberLedgerCollector {
       memberToken: "",
       memberName: "",
       agreedRules: null,
+      boundAccountHash: "",
+      boundAccountMasked: "",
+      targetAccountHash: "",
+      manualPaused: false,
     };
     writeJsonAtomic(this.configPath, this.config);
     try {
@@ -967,7 +1653,9 @@ export class MemberLedgerCollector {
     this.state.lastError = "";
     this.state.accountBlocked = null;
     this.state.lastSyncedBatch = null;
-    this.saveState();
+    this.state.lsConnectionIssue = null;
+    this._pendingRebindFlag = false;
+    this._purgeLocalQueueAndAnchor(COLLECTION_STATES.UNBOUND);
     return this.getPublicState();
   }
 
@@ -977,12 +1665,269 @@ export class MemberLedgerCollector {
     } catch {}
   }
 
+  async _queryLocalUserStatus() {
+    if (typeof this.fetchUserStatusImpl === "function") {
+      return await this.fetchUserStatusImpl(this.env);
+    }
+    return await fetchLocalUserStatus(this.env);
+  }
+
+  async _queryLocalQuotaSnapshots() {
+    if (typeof this.fetchQuotaSnapshotsImpl === "function") {
+      return await this.fetchQuotaSnapshotsImpl(this.env);
+    }
+    return await fetchLocalQuotaSnapshots(this.env);
+  }
+
+  /**
+   * 12 秒本地零流量账号守卫（6 态采集状态机核心）：
+   * - 任何非 ACTIVE_MATCH 状态下绝不向 pendingEvents 入队，且持续快进所有活跃日志至 EOF；
+   * - 切回 ACTIVE_MATCH 或跨越 >45s 停摆间隙时先锚定 EOF 再采集，彻底根除翻旧账；
+   * - 宿主托管模式下连续 3 次本地接口 401/ECONNREFUSED 且满 10 分钟冷却时触发受控自愈回调。
+   */
+  async tickAccountGuard() {
+    if (this._guardInFlight) {
+      return await this._guardInFlight;
+    }
+    this._guardInFlight = this._runAccountGuard().finally(() => {
+      this._guardInFlight = null;
+    });
+    return await this._guardInFlight;
+  }
+
+  async _runAccountGuard() {
+    if (!this.leaseCheckFn()) {
+      return { ok: false, reason: "lease_lost", state: this.state.collectionState, identityVerified: false };
+    }
+    this.maybeReloadConfig();
+    const nowMs = this.nowFn();
+    const roots = this._resolveRoots();
+    const prevState = this.state.collectionState || COLLECTION_STATES.UNBOUND;
+    const prevWatchdogAtMs = Number(this.state.lastWatchdogAtMs || 0);
+    const hadDisabledGap = prevWatchdogAtMs > 0 && nowMs - prevWatchdogAtMs > DISABLED_GAP_MS;
+
+    // 1. 未绑定状态：绝不入队，持续快进 EOF
+    if (!this._isConfigured()) {
+      this.state.collectionState = COLLECTION_STATES.UNBOUND;
+      this.state.pendingEvents = [];
+      this.state.lastLocalSnapshots = [];
+      this.state.lastWatchdogAtMs = nowMs;
+      fastForwardTranscriptOffsets(this.state, roots, { nowMs, env: this.env });
+      this.saveState();
+      return { ok: true, state: COLLECTION_STATES.UNBOUND, identityVerified: false, accountHash: "", accountTier: "" };
+    }
+
+    // 2. 查询本地 GetUserStatus（只读回环，耗时 < 8ms）
+    const ls = await this._queryLocalUserStatus();
+    this._currentIdentity = ls;
+
+    if (ls.ok) {
+      this._consecutiveIdentityFailures = 0;
+      this._consecutiveLsHardFailures = 0;
+      this.state.lsConnectionIssue = null;
+    } else if (ls.reason !== "sidecar_env_unavailable") {
+      this._consecutiveIdentityFailures += 1;
+      if (isLsHardDisconnect(ls)) {
+        this._consecutiveLsHardFailures += 1;
+      }
+    } else {
+      this._consecutiveIdentityFailures += 1;
+    }
+
+    // 检查连续 3 次本地接口 401 / ECONNREFUSED 限频自愈
+    let selfHealTriggered = false;
+    if (this._consecutiveLsHardFailures >= 3) {
+      const lastHealMs = Number(this.state.lastLsSelfHealAtMs || 0);
+      const cooldownOk = !lastHealMs || nowMs - lastHealMs >= LS_SELF_HEAL_COOLDOWN_MS;
+      const isHosted = Boolean(this.env?.ANTIGRAVITY_SIDECAR_WEB_PORT);
+      this.state.lsConnectionIssue = {
+        atMs: nowMs,
+        reason: String(ls.reason || "ls_disconnected"),
+        failures: this._consecutiveLsHardFailures,
+        coolingDown: !cooldownOk,
+      };
+      if (isHosted && cooldownOk && !this._lsSelfHealTriggeredThisSession) {
+        this.state.lastLsSelfHealAtMs = nowMs;
+        this._lsSelfHealTriggeredThisSession = true;
+        selfHealTriggered = true;
+        this.saveState();
+        if (this.onSelfHealRequested) {
+          this.onSelfHealRequested({ reason: ls.reason, failures: this._consecutiveLsHardFailures, nowMs });
+        }
+      }
+    }
+
+    // 3. 手动暂停优先：持续快进 EOF，绝不入队
+    if (this.config.manualPaused) {
+      this.state.collectionState = COLLECTION_STATES.PAUSED_MANUAL;
+      this.state.lastWatchdogAtMs = nowMs;
+      fastForwardTranscriptOffsets(this.state, roots, { nowMs, env: this.env });
+      this.saveState();
+      return {
+        ok: true,
+        state: COLLECTION_STATES.PAUSED_MANUAL,
+        identityVerified: Boolean(ls.ok && ls.loggedIn),
+        accountHash: ls.ok ? ls.accountHash : "",
+        accountTier: ls.ok ? ls.accountTier : "",
+        selfHealTriggered,
+      };
+    }
+
+    // 4. 计算目标归属指纹并判定 6 态
+    let targetHash = this._getEffectiveTargetAccountHash();
+    let nextState = COLLECTION_STATES.ACTIVE_MATCH;
+    let identityVerified = false;
+    let activeHash = "";
+    let activeTier = "";
+
+    if (ls.ok) {
+      activeTier = ls.accountTier || "";
+      if (ls.loggedIn && ls.accountHash) {
+        if (!targetHash) {
+          // per_member_lock 且尚未锁号 -> 首次识别到有效账号自动锁定
+          this.config.boundAccountHash = ls.accountHash;
+          this.config.boundAccountMasked = ls.accountMasked;
+          writeJsonAtomic(this.configPath, this.config);
+          try {
+            this._configMtimeMs = fs.statSync(this.configPath).mtimeMs;
+          } catch {}
+          targetHash = ls.accountHash;
+        }
+        if (ls.accountHash === targetHash) {
+          nextState = COLLECTION_STATES.ACTIVE_MATCH;
+          identityVerified = true;
+          activeHash = ls.accountHash;
+          // 同步补齐本地脱敏显示串（如通过 &ah= 或组长预锁首次匹配成功）
+          if (!this.config.boundAccountMasked || this.config.boundAccountHash !== ls.accountHash) {
+            this.config.boundAccountHash = ls.accountHash;
+            this.config.boundAccountMasked = ls.accountMasked;
+            writeJsonAtomic(this.configPath, this.config);
+            try {
+              this._configMtimeMs = fs.statSync(this.configPath).mtimeMs;
+            } catch {}
+          }
+        } else {
+          nextState = COLLECTION_STATES.PAUSED_ACCOUNT_MISMATCH;
+          activeHash = ls.accountHash;
+        }
+      } else {
+        // GetUserStatus 成功但未登录账号
+        nextState = targetHash ? COLLECTION_STATES.PAUSED_ACCOUNT_MISMATCH : COLLECTION_STATES.ACTIVE_MATCH;
+      }
+    } else {
+      // GetUserStatus 读取失败
+      if (this._consecutiveLsHardFailures >= 3) {
+        nextState = COLLECTION_STATES.PAUSED_IDENTITY_UNAVAILABLE;
+      } else if (targetHash) {
+        // 已设置账号锁：单次失败期间绝不盲采；累计 >=3 次或明确无宿主环境时进入 PAUSED_IDENTITY_UNAVAILABLE
+        if (this._consecutiveIdentityFailures >= 3 || ls.reason === "sidecar_env_unavailable") {
+          nextState = COLLECTION_STATES.PAUSED_IDENTITY_UNAVAILABLE;
+        } else {
+          // 瞬时抖动：保持暂停采集但不改变展示态（仍防串号）
+          this.state.lastWatchdogAtMs = nowMs;
+          this.saveState();
+          return {
+            ok: true,
+            state: prevState === COLLECTION_STATES.ACTIVE_MATCH ? COLLECTION_STATES.PAUSED_IDENTITY_UNAVAILABLE : prevState,
+            transientHold: true,
+            identityVerified: false,
+            accountHash: "",
+            accountTier: "",
+            selfHealTriggered,
+          };
+        }
+      } else {
+        // 无账号锁且无宿主 LS 环境（兼容独立预览/精简版，兜底走手动暂停开关）
+        nextState = COLLECTION_STATES.ACTIVE_MATCH;
+        identityVerified = false;
+      }
+    }
+
+    // 5. 若被服务端暂停/停用，保持 BLOCKED_BY_SERVER（在 syncOnce 重试解除）
+    if (this.state.accountBlocked && nextState === COLLECTION_STATES.ACTIVE_MATCH) {
+      nextState = COLLECTION_STATES.BLOCKED_BY_SERVER;
+    }
+
+    // 6. 非 ACTIVE_MATCH 态：绝不入队，持续快进 EOF
+    if (nextState !== COLLECTION_STATES.ACTIVE_MATCH) {
+      this.state.collectionState = nextState;
+      this.state.lastWatchdogAtMs = nowMs;
+      if (nextState !== COLLECTION_STATES.BLOCKED_BY_SERVER) {
+        fastForwardTranscriptOffsets(this.state, roots, { nowMs, env: this.env });
+      }
+      this.saveState();
+      return {
+        ok: true,
+        state: nextState,
+        identityVerified: false,
+        accountHash: activeHash,
+        accountTier: activeTier,
+        selfHealTriggered,
+      };
+    }
+
+    // 7. 进入 ACTIVE_MATCH：若从非 ACTIVE_MATCH 切入，或检测到停摆间隔 > 45s，先锚定 EOF 再采集
+    if (prevState !== COLLECTION_STATES.ACTIVE_MATCH) {
+      fastForwardTranscriptOffsets(this.state, roots, { nowMs, env: this.env });
+      this.state.collectionCursorMs = nowMs;
+    } else if (hadDisabledGap) {
+      const gapCutoffMs = Math.max(this._bootStartMs - BOOT_GRACE_MS, nowMs - BOOT_GRACE_MS);
+      fastForwardTranscriptOffsets(this.state, roots, {
+        nowMs,
+        anchorBeforeMs: gapCutoffMs,
+        env: this.env,
+      });
+      this.state.collectionCursorMs = Math.max(Number(this.state.collectionCursorMs) || 0, gapCutoffMs);
+    }
+
+    this.state.collectionState = COLLECTION_STATES.ACTIVE_MATCH;
+    this.state.lastWatchdogAtMs = nowMs;
+
+    // 8. 仅在 ACTIVE_MATCH 状态下扫描增量日志并打上 _scopeKey 入队
+    const fresh = scanIncrementalTranscriptUsage(this.state, roots, { nowMs, env: this.env });
+    if (!Array.isArray(this.state.pendingEvents)) this.state.pendingEvents = [];
+    if (fresh.length > 0) {
+      const scopeKey = this._computeScopeKey(activeHash);
+      const seenIds = new Set(this.state.pendingEvents.map((e) => e.id));
+      for (const ev of fresh) {
+        if (!seenIds.has(ev.id)) {
+          this.state.pendingEvents.push({ ...ev, _scopeKey: scopeKey });
+          seenIds.add(ev.id);
+        }
+      }
+      if (this.state.pendingEvents.length > MAX_PENDING_QUEUE) {
+        this.state.pendingEvents = this.state.pendingEvents.slice(-MAX_PENDING_QUEUE);
+      }
+    }
+
+    this.saveState();
+    return {
+      ok: true,
+      state: COLLECTION_STATES.ACTIVE_MATCH,
+      identityVerified,
+      accountHash: activeHash,
+      accountTier: activeTier,
+      selfHealTriggered,
+    };
+  }
+
   getPublicState() {
     this.maybeReloadConfig();
     const mv = this.state.lastMemberView || null;
     const ruleMismatch = evaluateRuleMismatch(this.config.agreedRules, mv);
+    const targetHash = this._getEffectiveTargetAccountHash();
+    const mvLock = mv?.accountLock || null;
+    const isolationMode =
+      mvLock?.isolationMode === "shared_owner_account" ? "shared_owner_account" : "per_member_lock";
+    const lockedByAdmin = Boolean(mvLock?.lockedByAdmin);
+    const canSelfRebind =
+      this._isConfigured() &&
+      isolationMode === "per_member_lock" &&
+      !lockedByAdmin &&
+      Boolean(this._currentIdentity?.ok && this._currentIdentity?.loggedIn && this._currentIdentity?.accountHash);
+
     return {
-      configured: Boolean(this.config.serverUrl && this.config.memberToken),
+      configured: this._isConfigured(),
       config: {
         serverUrl: this.config.serverUrl || "",
         memberName: this.config.memberName || "",
@@ -991,8 +1936,29 @@ export class MemberLedgerCollector {
         tokenPreview: this.config.memberToken ? `${this.config.memberToken.slice(0, 8)}••••` : "",
         syncIntervalSec: this.config.syncIntervalSec || 90,
         agreedRules: this.config.agreedRules || null,
+        boundAccountHash: this.config.boundAccountHash || "",
+        boundAccountMasked: this.config.boundAccountMasked || "",
+        targetAccountHash: targetHash,
+        manualPaused: Boolean(this.config.manualPaused),
         autoCheckUpdates: this.config.autoCheckUpdates !== false,
         ignoredUpdateVersion: String(this.config.ignoredUpdateVersion || ""),
+      },
+      accountGuard: {
+        collectionState: this.state.collectionState || (this._isConfigured() ? COLLECTION_STATES.ACTIVE_MATCH : COLLECTION_STATES.UNBOUND),
+        collectionStatus: stateToClientStatus(this.state.collectionState),
+        isolationMode,
+        lockedByAdmin,
+        canSelfRebind,
+        identityAvailable: Boolean(this._currentIdentity?.ok),
+        currentLoggedIn: Boolean(this._currentIdentity?.loggedIn),
+        currentAccountHash: this._currentIdentity?.accountHash || "",
+        currentAccountMasked: this._currentIdentity?.accountMasked || "",
+        currentAccountTier: this._currentIdentity?.accountTier || "",
+        targetAccountHash: targetHash,
+        boundAccountMasked: this.config.boundAccountMasked || "",
+        manualPaused: Boolean(this.config.manualPaused),
+        lsConnectionIssue: this.state.lsConnectionIssue || null,
+        deviceId: this.state.deviceId || "",
       },
       ruleMismatch,
       syncInFlight: Boolean(this._isSyncing),
@@ -1012,7 +1978,7 @@ export class MemberLedgerCollector {
 
   async confirmRules() {
     this.maybeReloadConfig();
-    if (!this.config.serverUrl || !this.config.memberToken) {
+    if (!this._isConfigured()) {
       throw new Error("尚未连接看板");
     }
     const endpoint = `${this.config.serverUrl.replace(/\/+$/, "")}/api/member/confirm-rules`;
@@ -1059,7 +2025,6 @@ export class MemberLedgerCollector {
   }
 
   async syncOnce() {
-    // 并发互斥锁：避免手动点击「同步」与后台定时任务重叠导致重复发包与队列错切
     if (this._syncInFlight) {
       return await this._syncInFlight;
     }
@@ -1072,46 +2037,49 @@ export class MemberLedgerCollector {
   }
 
   async _runSyncOnce() {
+    if (!this.leaseCheckFn()) {
+      this._isSyncing = false;
+      return { ok: false, reason: "lease_lost", state: this.getPublicState() };
+    }
     this.maybeReloadConfig();
 
-    const fresh = scanIncrementalTranscriptUsage(this.state, this.transcriptRoots);
-    if (!Array.isArray(this.state.pendingEvents)) this.state.pendingEvents = [];
-    if (fresh.length > 0) {
-      const seenIds = new Set(this.state.pendingEvents.map((e) => e.id));
-      for (const ev of fresh) {
-        if (!seenIds.has(ev.id)) {
-          this.state.pendingEvents.push(ev);
-          seenIds.add(ev.id);
-        }
-      }
-      if (this.state.pendingEvents.length > MAX_PENDING_QUEUE) {
-        this.state.pendingEvents = this.state.pendingEvents.slice(-MAX_PENDING_QUEUE);
-      }
-    }
-
-    const qRes = await fetchLocalQuotaSnapshots();
-    if (qRes.ok && qRes.snapshots.length > 0) {
-      this.state.lastLocalSnapshots = qRes.snapshots;
-    }
-
-    if (!this.config.serverUrl || !this.config.memberToken) {
+    if (!this._isConfigured()) {
+      await this.tickAccountGuard();
       this.state.lastError = "尚未填写绑定码";
       this.saveState();
       this._isSyncing = false;
       return { ok: false, reason: "not_configured", state: this.getPublicState() };
     }
 
+    // 先执行账号守卫校验（若是手动重试同步且此前被服务端暂停，仍允许发心跳探活）
+    const wasBlocked = Boolean(this.state.accountBlocked);
+    if (wasBlocked) {
+      this.state.accountBlocked = null;
+    }
+    const guard = await this.tickAccountGuard();
+    const isActiveMatch = guard.state === COLLECTION_STATES.ACTIVE_MATCH && !guard.transientHold;
+    const collectionStatus = stateToClientStatus(guard.state);
+
+    // 水位防串号第一道防线：仅在 ACTIVE_MATCH 且身份核验通过时拉取并发送官方水位快照
+    let quotaSnapshots = [];
+    let hasSeparateArgonPool = undefined;
+    if (isActiveMatch && guard.identityVerified) {
+      const qRes = await this._queryLocalQuotaSnapshots();
+      if (this.leaseCheckFn() && qRes.ok && Array.isArray(qRes.snapshots) && qRes.snapshots.length > 0) {
+        quotaSnapshots = qRes.snapshots;
+        hasSeparateArgonPool = Boolean(qRes.hasSeparateArgonPool);
+        this.state.lastLocalSnapshots = qRes.snapshots;
+      }
+    }
+
     const endpoint = `${this.config.serverUrl.replace(/\/+$/, "")}/api/member/heartbeat`;
 
     try {
-      // 单次心跳最多携带 80 条记录并给足 25 秒超时；若有积压队列则连续分批平滑补传（单轮最多 4 批）
       let lastData = null;
       const sentEventsThisRun = [];
-      const MAX_DRAIN_ROUNDS = 4;
-      for (let round = 0; round < MAX_DRAIN_ROUNDS; round++) {
-        const batch = this.state.pendingEvents.slice(0, 80);
-        const batchIds = new Set(batch.map((e) => e.id));
-        const sendSnapshots = round === 0 && qRes.ok ? qRes.snapshots : [];
+
+      if (!isActiveMatch) {
+        // 暂停态（切到其他账号 / 手动暂停 / 本地接口失联）：仅发空数据状态包，刷新全组余量视图
         const { ok, status, data } = await postJsonRequest(
           endpoint,
           {
@@ -1121,23 +2089,73 @@ export class MemberLedgerCollector {
           },
           {
             clientVersion: CLIENT_VERSION,
-            usageEvents: batch,
-            quotaSnapshots: sendSnapshots,
+            deviceId: this.state.deviceId,
+            accountHash: guard.accountHash || "",
+            accountTier: guard.accountTier || "",
+            collectionStatus,
+            usageEvents: [],
+            quotaSnapshots: [],
           },
-          { proxyUrl: this.config.proxyUrl, timeoutMs: 25000 }
+          { proxyUrl: this.config.proxyUrl, timeoutMs: 18000 }
         );
         if (!ok || !data?.ok) {
           throw new Error(data?.error || `中转服务返回 HTTP ${status}`);
         }
-        // 按精确已送达 ID 剔除，绝不误删请求在途期间新采集到的事件
-        if (batch.length > 0) sentEventsThisRun.push(...batch);
-        this.state.pendingEvents = this.state.pendingEvents.filter((e) => !batchIds.has(e.id));
         lastData = data;
-        if (this.state.pendingEvents.length === 0) break;
+      } else {
+        // 发包前二次 _scopeKey 过滤，清除不属于当前上下文的历史残留条目
+        const curScopeKey = this._computeScopeKey(guard.accountHash || "");
+        this.state.pendingEvents = (this.state.pendingEvents || []).filter(
+          (e) => !e._scopeKey || e._scopeKey === curScopeKey
+        );
+
+        const MAX_DRAIN_ROUNDS = 4;
+        for (let round = 0; round < MAX_DRAIN_ROUNDS; round++) {
+          const rawBatch = this.state.pendingEvents.slice(0, 80);
+          const batchIds = new Set(rawBatch.map((e) => e.id));
+          const wireBatch = rawBatch.map(({ _scopeKey: _ignoredScope, ...rest }) => rest);
+          const sendSnapshots = round === 0 ? quotaSnapshots : [];
+          const bodyPayload = {
+            clientVersion: CLIENT_VERSION,
+            deviceId: this.state.deviceId,
+            accountHash: guard.accountHash || "",
+            accountTier: guard.accountTier || "",
+            collectionStatus: "active",
+            usageEvents: wireBatch,
+            quotaSnapshots: sendSnapshots,
+          };
+          if (round === 0 && typeof hasSeparateArgonPool === "boolean") {
+            bodyPayload.hasSeparateArgonPool = hasSeparateArgonPool;
+          }
+          if (round === 0 && this._pendingRebindFlag) {
+            bodyPayload.rebindAccount = true;
+          }
+
+          const { ok, status, data } = await postJsonRequest(
+            endpoint,
+            {
+              "User-Agent": `AgyFamilyLedger/${CLIENT_VERSION}`,
+              "Content-Type": "application/json",
+              "X-Member-Token": this.config.memberToken,
+            },
+            bodyPayload,
+            { proxyUrl: this.config.proxyUrl, timeoutMs: 25000 }
+          );
+          if (!ok || !data?.ok) {
+            throw new Error(data?.error || `中转服务返回 HTTP ${status}`);
+          }
+          if (round === 0 && this._pendingRebindFlag) {
+            this._pendingRebindFlag = false;
+          }
+          if (rawBatch.length > 0) sentEventsThisRun.push(...rawBatch);
+          this.state.pendingEvents = this.state.pendingEvents.filter((e) => !batchIds.has(e.id));
+          lastData = data;
+          if (this.state.pendingEvents.length === 0) break;
+        }
       }
 
       const data = lastData || {};
-      const syncedAtIso = new Date().toISOString();
+      const syncedAtIso = new Date(this.nowFn()).toISOString();
       this.state.lastSyncAt = syncedAtIso;
       if (sentEventsThisRun.length > 0) {
         this.state.lastSyncedBatch = {
@@ -1148,9 +2166,11 @@ export class MemberLedgerCollector {
       }
       this.state.lastError = "";
       this.state.accountBlocked = null;
+
       if (data.member) {
         this.state.lastMemberView = data.member;
-        // 兼容旧版短绑定码：若首次同步时尚未记录 agreedRules，自动锁定入组基线规则
+        this._syncLocalAccountLockFromServer(data.member.accountLock);
+
         if (!this.config.agreedRules && data.member.pricing && data.member.role !== "owner") {
           const p = data.member.pricing;
           this.saveConfig({
@@ -1165,7 +2185,7 @@ export class MemberLedgerCollector {
               restrict3pForMembers: Boolean(p.restrict3pForMembers),
               usageRuleNote: sanitizeUsageRuleNote(p.usageRuleNote || ""),
               usageRuleNoteHash: String(p.usageRuleNoteHash || "") || computeRuleNoteHash(p.usageRuleNote || ""),
-              agreedAt: new Date().toISOString(),
+              agreedAt: new Date(this.nowFn()).toISOString(),
               source: "first_sync_snapshot",
             },
           });
@@ -1182,7 +2202,6 @@ export class MemberLedgerCollector {
             p.usageRuleNote &&
             computeRuleNoteHash(p.usageRuleNote) === ar.usageRuleNoteHash
           ) {
-            // 若绑定码仅携带了文字说明短哈希且与服务端原文一致，补存原文便于日后变动对比
             this.saveConfig({
               agreedRules: {
                 ...ar,
@@ -1191,9 +2210,6 @@ export class MemberLedgerCollector {
             });
           }
 
-          // 若成员刚通过新版绑定码入组，且绑定码中锁定的版本号与全部计费/约定参数与云端 100% 一致，
-          // 自动同步服务端 accepted_rule_version，避免弹出“原约定与云端新规则完全一样”的重复确认卡片；
-          // 只要云端有任何一项参数与绑定码不符或版本号更新，绝不自动确认。
           const checkWithoutServerFlag = evaluateRuleMismatch(this.config.agreedRules, {
             ...data.member,
             needsRuleConfirm: false,
@@ -1219,11 +2235,24 @@ export class MemberLedgerCollector {
                 this.state.lastMemberView = confRes.data.member;
               }
             } catch {
-              // 自动对齐失败不影响主流程，用户仍可手动点击确认
+              // 自动对齐失败不影响主流程
             }
           }
         }
       }
+
+      // 若服务端刚刚下发了新的强制目标账号锁与当前账号不符，立即切入暂停保护态
+      const postTarget = this._getEffectiveTargetAccountHash();
+      if (
+        postTarget &&
+        this._currentIdentity?.ok &&
+        this._currentIdentity?.accountHash &&
+        this._currentIdentity.accountHash !== postTarget &&
+        !this.config.manualPaused
+      ) {
+        this.state.collectionState = COLLECTION_STATES.PAUSED_ACCOUNT_MISMATCH;
+      }
+
       this.saveState();
       this._isSyncing = false;
       return { ok: true, state: this.getPublicState() };
@@ -1235,6 +2264,7 @@ export class MemberLedgerCollector {
           title: "账号同步已被组长暂停",
           detail: "你的成员同步状态当前处于暂停中，请先停止运行较重任务并联系组长恢复。",
         };
+        this.state.collectionState = COLLECTION_STATES.BLOCKED_BY_SERVER;
         this.state.lastError = "";
       } else if (/凭证已停用|已停用/.test(rawMsg)) {
         this.state.accountBlocked = {
@@ -1242,6 +2272,7 @@ export class MemberLedgerCollector {
           title: "成员绑定码已停用",
           detail: "当前绑定码已被组长停用，如需继续使用请联系组长获取新绑定码并在底部「连接配置」中更换。",
         };
+        this.state.collectionState = COLLECTION_STATES.BLOCKED_BY_SERVER;
         this.state.lastError = "";
       } else if (/无效的成员凭证/.test(rawMsg)) {
         this.state.accountBlocked = {
@@ -1249,6 +2280,7 @@ export class MemberLedgerCollector {
           title: "成员绑定码已失效",
           detail: "服务端未识别当前绑定码（可能已被组长重置），请联系组长获取新绑定码并在「连接配置」中重新粘贴。",
         };
+        this.state.collectionState = COLLECTION_STATES.BLOCKED_BY_SERVER;
         this.state.lastError = "";
       } else {
         this.state.accountBlocked = null;
@@ -1261,6 +2293,28 @@ export class MemberLedgerCollector {
       this.saveState();
       this._isSyncing = false;
       return { ok: false, reason: rawMsg || "sync_failed", state: this.getPublicState() };
+    }
+  }
+
+  _syncLocalAccountLockFromServer(accountLock) {
+    if (!accountLock || typeof accountLock !== "object") return;
+    let nextTarget = "";
+    if (accountLock.isolationMode === "shared_owner_account" && normalizeAccountHash(accountLock.sharedAccountHash)) {
+      nextTarget = normalizeAccountHash(accountLock.sharedAccountHash);
+    } else if (accountLock.lockedByAdmin && normalizeAccountHash(accountLock.boundAccountHash)) {
+      nextTarget = normalizeAccountHash(accountLock.boundAccountHash);
+    }
+    const curTarget = normalizeAccountHash(this.config.targetAccountHash || "");
+    if (nextTarget !== curTarget) {
+      this.config.targetAccountHash = nextTarget;
+      if (nextTarget && this.config.boundAccountHash && this.config.boundAccountHash !== nextTarget) {
+        this.config.boundAccountHash = "";
+        this.config.boundAccountMasked = "";
+      }
+      writeJsonAtomic(this.configPath, this.config);
+      try {
+        this._configMtimeMs = fs.statSync(this.configPath).mtimeMs;
+      } catch {}
     }
   }
 }

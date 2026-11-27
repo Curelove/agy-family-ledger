@@ -1,5 +1,5 @@
 /**
- * Cloudflare Workers 云端记账中转 (v1.4.0 · 免费层 0 元运行)
+ * Cloudflare Workers 云端记账中转 (v1.6.0 · 免费层 0 元运行)
  *
  * 环境变量：
  * - env.DB           : Cloudflare D1 数据库绑定
@@ -9,11 +9,11 @@ import { LedgerStore, wrapD1Adapter } from "../shared/ledger-store.mjs";
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', member_token TEXT NOT NULL UNIQUE, balance_fen INTEGER NOT NULL DEFAULT 0, low_balance_fen INTEGER NOT NULL DEFAULT 200, status TEXT NOT NULL DEFAULT 'active', accepted_rule_version INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT '', last_seen_at TEXT, last_client_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', member_token TEXT NOT NULL UNIQUE, balance_fen INTEGER NOT NULL DEFAULT 0, low_balance_fen INTEGER NOT NULL DEFAULT 200, status TEXT NOT NULL DEFAULT 'active', accepted_rule_version INTEGER NOT NULL DEFAULT 1, bound_account_hash TEXT NOT NULL DEFAULT '', bound_account_locked_by_admin INTEGER NOT NULL DEFAULT 0, account_tier TEXT NOT NULL DEFAULT '', collection_status TEXT NOT NULL DEFAULT 'active', devices_json TEXT NOT NULL DEFAULT '{}', note TEXT NOT NULL DEFAULT '', last_seen_at TEXT, last_client_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usage_reports (id TEXT PRIMARY KEY, member_id TEXT NOT NULL, slice_start_ms INTEGER NOT NULL, event_ts_ms INTEGER NOT NULL DEFAULT 0, pool_key TEXT NOT NULL, model_name TEXT NOT NULL DEFAULT '', request_count INTEGER NOT NULL DEFAULT 0, uncached_input_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, weighted_units REAL NOT NULL DEFAULT 0, settled_snapshot_id INTEGER DEFAULT NULL, reported_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_usage_reports_slice_pool ON usage_reports (slice_start_ms, pool_key);
 CREATE INDEX IF NOT EXISTS idx_usage_reports_member ON usage_reports (member_id, slice_start_ms);
-CREATE TABLE IF NOT EXISTS pool_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_key TEXT NOT NULL, window_key TEXT NOT NULL, remaining_pct REAL NOT NULL, reset_at TEXT, reporter_member_id TEXT NOT NULL, captured_at_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pool_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_key TEXT NOT NULL, window_key TEXT NOT NULL, remaining_pct REAL NOT NULL, reset_at TEXT, reporter_member_id TEXT NOT NULL, captured_at_ms INTEGER NOT NULL, account_hash TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots (pool_key, window_key, captured_at_ms);
 CREATE TABLE IF NOT EXISTS slice_allocations (id TEXT PRIMARY KEY, pool_key TEXT NOT NULL, slice_start_ms INTEGER NOT NULL, week_bucket TEXT NOT NULL, member_id TEXT NOT NULL, pool_drop_pct REAL NOT NULL, member_share_ratio REAL NOT NULL, attributed_pct REAL NOT NULL, weighted_units REAL NOT NULL, unit_price_fen_per_pct INTEGER NOT NULL, charge_fen INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_week ON slice_allocations (member_id, week_bucket);
@@ -93,7 +93,7 @@ export default {
       return jsonResp({
         ok: true,
         service: "agy-family-ledger-worker",
-        version: "1.5.0",
+        version: "1.6.0",
         hasDb: Boolean(env?.DB),
         hasAdminSecret: Boolean(env?.ADMIN_SECRET),
       });

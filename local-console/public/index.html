@@ -326,6 +326,55 @@
           </div>
 
           <div class="settings-stack">
+            <div class="settings-panel" id="account-isolation-panel">
+              <h2>多账号防串号与套餐档位</h2>
+              <div class="form-field">
+                <label>账号归属隔离模式</label>
+                <div class="choice-rail" role="radiogroup" aria-label="账号归属隔离模式">
+                  <label class="choice-item">
+                    <input type="radio" name="account-isolation-mode" value="per_member_lock" checked/>
+                    <div>
+                      <div class="choice-title">每人锁定各自家庭组账号（默认推荐）</div>
+                      <div class="choice-sub">适合 Google 家庭组独立邮箱：成员首次同步自动锁定当前号，切至个人号自动暂停，支持侧边栏换绑或由组长单独预锁。</div>
+                    </div>
+                  </label>
+                  <label class="choice-item">
+                    <input type="radio" name="account-isolation-mode" value="shared_owner_account"/>
+                    <div>
+                      <div class="choice-title">全组共用同一登录账号</div>
+                      <div class="choice-sub">适合多人合租同一个共享邮箱：全组强制只认指定指纹，成员挂在个人号时粘贴绑定码也会立即暂停防绑错。</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <div class="sub-box" id="shared-account-box" hidden>
+                <div class="sub-box-title">共享账号指纹锁定</div>
+                <div class="price-hint-line" id="shared-hash-status" style="margin-bottom:8px;">尚未设定共享账号指纹</div>
+                <div class="btn-pair" style="margin-bottom:10px;">
+                  <button type="button" class="btn-soft" id="btn-lock-owner-account">一键锁定组长当前账号</button>
+                  <button type="button" class="btn-soft" id="btn-clear-shared-hash" hidden>清除已锁指纹</button>
+                </div>
+                <div class="form-field" style="margin-bottom:4px;">
+                  <label for="set-shared-email">或输入共享邮箱（仅在浏览器本地算 20 位短指纹，明文不上传）</label>
+                  <input id="set-shared-email" type="email" autocomplete="off" placeholder="例如：family-owner@gmail.com"/>
+                </div>
+                <div class="hash-preview-line" id="shared-email-hash-preview">留空则保持上方已锁指纹不变</div>
+              </div>
+
+              <div class="form-field" style="margin-bottom:8px;">
+                <label for="set-plan-tier">套餐配额档位（决定防背锅与黑洞单位基准）</label>
+                <select id="set-plan-tier">
+                  <option value="auto">自动跟随组长当前账号档位（推荐）</option>
+                  <option value="ultra">Google AI Ultra（大池基准）</option>
+                  <option value="pro">Google AI Pro（小池基准）</option>
+                </select>
+              </div>
+              <div class="price-hint-line" id="plan-tier-hint" style="margin-bottom:14px;">自动模式将根据组长插件上报的订阅档位与独立 Argon 桶动态适配。</div>
+
+              <button class="btn-ink" id="btn-save-isolation">保存账号锁与档位</button>
+            </div>
+
             <div class="settings-panel">
               <h2>数据存储位置</h2>
               <div class="choice-rail" role="radiogroup" aria-label="存储位置">
@@ -365,7 +414,7 @@
             <div class="settings-panel" id="console-update-panel">
               <div class="update-panel-head">
                 <h2 style="margin:0;">版本与 GitHub 更新</h2>
-                <span class="status-stamp" id="console-cur-ver-badge">v1.4.0</span>
+                <span class="status-stamp" id="console-cur-ver-badge">v1.6.0</span>
               </div>
               <div class="toggle-row" style="margin-top:12px;">
                 <div>
@@ -417,9 +466,14 @@
             <input id="add-low-yuan" type="number" step="0.5" value="2"/>
           </div>
         </div>
-        <div class="form-field" style="margin-bottom:0;">
+        <div class="form-field">
           <label for="add-note">备注（选填）</label>
           <input id="add-note" type="text" placeholder="可记录常用设备或备注说明"/>
+        </div>
+        <div class="form-field" style="margin-bottom:0;">
+          <label for="add-lock-email">预锁成员家庭组邮箱（选填，仅本地计算短指纹，不上传邮箱原文）</label>
+          <input id="add-lock-email" type="email" autocomplete="off" placeholder="留空则由成员首次同步时自动锁定当前账号"/>
+          <div class="hash-preview-line" id="add-lock-hash-preview">填后将锁定该成员仅统计指定邮箱，防止首次绑定挂错个人号。</div>
         </div>
       </div>
       <div class="modal-foot">
@@ -464,6 +518,7 @@
             <code id="inv-code-text">--</code>
             <button class="btn-soft" id="btn-copy-code-only">仅复制绑定码</button>
           </div>
+          <div class="price-hint-line" id="inv-account-lock-note" style="margin-top:7px;" hidden></div>
         </div>
       </div>
       <div class="modal-foot">
@@ -502,6 +557,32 @@
       <div class="modal-foot">
         <button class="btn-ghost" data-close-modal="modal-topup">取消</button>
         <button class="btn-ink" id="btn-confirm-topup">确认记录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：成员账号归属锁管理 -->
+  <div class="modal-backdrop" id="modal-account-lock" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-lock-title">
+      <div class="modal-head">
+        <h3 id="modal-lock-title">成员账号归属锁</h3>
+        <button class="icon-close" data-close-modal="modal-account-lock" aria-label="关闭">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-target-line">成员：<strong id="lock-member-name">--</strong></div>
+        <div class="price-hint-line" id="lock-current-status" style="margin-bottom:12px;">--</div>
+        <div class="form-field" style="margin-bottom:0;">
+          <label for="edit-lock-email">输入该成员的家庭组邮箱以强制预锁（仅浏览器本地计算指纹，明文不上传）</label>
+          <input id="edit-lock-email" type="email" autocomplete="off" placeholder="例如：member@gmail.com"/>
+          <div class="hash-preview-line" id="edit-lock-hash-preview">输入完整邮箱后将实时显示 20 位不可逆短指纹</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-danger-soft" id="btn-clear-member-lock" style="margin-right:auto;">清除锁定（允许重绑）</button>
+        <button class="btn-ghost" data-close-modal="modal-account-lock">取消</button>
+        <button class="btn-ink" id="btn-save-member-lock">保存预锁</button>
       </div>
     </div>
   </div>

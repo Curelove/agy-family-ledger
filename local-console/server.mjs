@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.4.0)
+ * Antigravity 家庭组共享额度看板 · 本地管理控制台后端 (v1.6.0)
  *
  * 特性：
  * - 支持 Cloudflare Workers 云端同步与本机 SQLite 离线存储切换。
@@ -128,7 +128,7 @@ async function proxyToCloud(cfg, apiPath, method = "GET", body = null) {
   const resp = await fetch(url, {
     method,
     headers: {
-      "User-Agent": "AgyFamilyLedger/1.3",
+      "User-Agent": "AgyFamilyLedger/1.6.0",
       "Content-Type": "application/json",
       "X-Admin-Secret": cfg.adminSecret,
     },
@@ -177,7 +177,7 @@ async function callBackend(apiPath, method = "GET", body = null) {
 function copyDirSync(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
-    if (ent.name === "config.json" || ent.name.startsWith(".")) continue;
+    if (ent.name === "config.json" || ent.name === "backups" || ent.name.startsWith(".")) continue;
     const s = path.join(src, ent.name);
     const d = path.join(dst, ent.name);
     if (ent.isDirectory()) copyDirSync(s, d);
@@ -186,7 +186,7 @@ function copyDirSync(src, dst) {
 }
 
 /**
- * 生成指定成员的含初始规则约定的纯文本绑定信息（零私包，官方 GitHub Releases 渠道）
+ * 生成指定成员的含初始规则约定与可选账号锁指纹的纯文本绑定信息（零私包，官方 GitHub Releases 渠道）
  */
 async function buildMemberInviteInfo(memberId, serverPort) {
   const dash = await callBackend("/api/admin/dashboard", "GET");
@@ -212,6 +212,14 @@ async function buildMemberInviteInfo(memberId, serverPort) {
   const applyCapToOwner = s.apply_cap_to_owner !== false;
   const restrict3pForMembers = Boolean(s.restrict_3p_for_members);
   const usageRuleNote = String(s.usage_rule_note || "").trim();
+  const accountIsolationMode =
+    s.account_isolation_mode === "shared_owner_account" ? "shared_owner_account" : "per_member_lock";
+  const targetAccountHash =
+    accountIsolationMode === "shared_owner_account" && s.shared_account_hash
+      ? String(s.shared_account_hash)
+      : member.boundAccountLockedByAdmin && member.boundAccountHash
+      ? String(member.boundAccountHash)
+      : "";
 
   const inviteCode = buildInviteCode({
     serverUrl: targetUrl,
@@ -225,6 +233,7 @@ async function buildMemberInviteInfo(memberId, serverPort) {
     applyCapToOwner,
     restrict3pForMembers,
     usageRuleNote,
+    targetAccountHash,
   });
   const isLocalOnly = /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(targetUrl);
 
@@ -235,6 +244,8 @@ async function buildMemberInviteInfo(memberId, serverPort) {
     serverUrl: targetUrl,
     inviteCode,
     ruleVersion,
+    accountIsolationMode,
+    targetAccountHash,
     termsSummary: formatPricingRuleSummary(s),
     isLocalOnly,
     repoUrl: GITHUB_REPO_URL,
@@ -245,7 +256,7 @@ async function buildMemberInviteInfo(memberId, serverPort) {
 }
 
 /**
- * 将组长本人插件同步到本机 Antigravity 插件目录（写入最新 config.json 后运行中 Sidecar 会自动热重载）
+ * 将组长本人插件同步到本机 Antigravity 插件目录（浅合并保留既有 config.json 全部用户状态字段，不丢失账号锁与暂停设置）
  */
 async function installOwnerPluginLocally(serverPort) {
   const dash = await callBackend("/api/admin/dashboard", "GET");
@@ -261,35 +272,32 @@ async function installOwnerPluginLocally(serverPort) {
   const dst = path.join(os.homedir(), ".gemini", "config", "plugins", "agy-family-ledger");
   copyDirSync(MEMBER_PLUGIN_SRC, dst);
   const cfgFile = path.join(dst, "sidecars", "ledger", "config.json");
-  let existingProxy = "";
-  let existingAutoCheck = true;
-  let existingIgnoredVer = "";
+  let prevCfg = {};
   try {
     if (fs.existsSync(cfgFile)) {
-      const prev = JSON.parse(fs.readFileSync(cfgFile, "utf8").replace(/^\uFEFF/, ""));
-      existingProxy = String(prev?.proxyUrl || "").trim();
-      if (prev?.autoCheckUpdates === false) existingAutoCheck = false;
-      existingIgnoredVer = String(prev?.ignoredUpdateVersion || "").trim();
+      const parsed = JSON.parse(fs.readFileSync(cfgFile, "utf8").replace(/^\uFEFF/, ""));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        prevCfg = parsed;
+      }
     }
   } catch {}
 
-  fs.writeFileSync(
-    cfgFile,
-    JSON.stringify(
-      {
-        serverUrl: targetUrl,
-        memberToken: owner.memberToken,
-        memberName: owner.name,
-        proxyUrl: existingProxy,
-        syncIntervalSec: 90,
-        autoCheckUpdates: existingAutoCheck,
-        ignoredUpdateVersion: existingIgnoredVer,
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
+  const mergedCfg = {
+    proxyUrl: "",
+    syncIntervalSec: 90,
+    boundAccountHash: "",
+    boundAccountMasked: "",
+    targetAccountHash: "",
+    manualPaused: false,
+    autoCheckUpdates: true,
+    ignoredUpdateVersion: "",
+    ...prevCfg,
+    serverUrl: targetUrl,
+    memberToken: owner.memberToken,
+    memberName: owner.name,
+  };
+
+  fs.writeFileSync(cfgFile, JSON.stringify(mergedCfg, null, 2), "utf8");
   return { ok: true, installDir: dst, memberName: owner.name, targetUrl };
 }
 
@@ -331,10 +339,19 @@ async function seedLocalDemoScenario() {
   const t1 = now - 12 * 60 * 1000;
   const t2 = now - 2 * 60 * 1000;
 
+  const demoOwnerHash = "a1b2c3d4e5f601234567";
+  const demoAliceHash = "b2c3d4e5f60123456789";
+  const demoBobHash = "c3d4e5f60123456789ab";
+
   await localStore.ingestHeartbeat(
     owner.memberToken,
     {
       nowMs: t0,
+      clientVersion: "1.6.0",
+      deviceId: "dev_owner000001",
+      accountHash: demoOwnerHash,
+      accountTier: "ultra",
+      collectionStatus: "active",
       quotaSnapshots: [
         { poolKey: "gemini", windowKey: "weekly", remainingPct: 92.0, resetAt: resetIso, capturedAtMs: t0 },
         { poolKey: "gemini", windowKey: "5h", remainingPct: 96.0, resetAt: new Date(now + 3 * 3600 * 1000).toISOString(), capturedAtMs: t0 },
@@ -349,6 +366,11 @@ async function seedLocalDemoScenario() {
     alice.member_token || alice.memberToken,
     {
       nowMs: t1 - 2000,
+      clientVersion: "1.6.0",
+      deviceId: "dev_alice000001",
+      accountHash: demoAliceHash,
+      accountTier: "ultra",
+      collectionStatus: "active",
       usageEvents: [
         { id: `demo_a_${t1}`, modelName: "gemini-4-carbon-high", uncachedInputTokens: 350000, outputTokens: 90000, timestampMs: t1 - 4000 },
       ],
@@ -359,6 +381,11 @@ async function seedLocalDemoScenario() {
     bob.member_token || bob.memberToken,
     {
       nowMs: t1 - 1000,
+      clientVersion: "1.6.0",
+      deviceId: "dev_bob00000001",
+      accountHash: demoBobHash,
+      accountTier: "ultra",
+      collectionStatus: "active",
       usageEvents: [
         { id: `demo_b_${t1}`, modelName: "gemini-4-hydrogen-high", uncachedInputTokens: 180000, outputTokens: 60000, timestampMs: t1 - 3000 },
       ],
@@ -369,6 +396,11 @@ async function seedLocalDemoScenario() {
     owner.memberToken,
     {
       nowMs: t1,
+      clientVersion: "1.6.0",
+      deviceId: "dev_owner000001",
+      accountHash: demoOwnerHash,
+      accountTier: "ultra",
+      collectionStatus: "active",
       usageEvents: [
         { id: `demo_o_${t1}`, modelName: "gemini-4-neon-xhigh", uncachedInputTokens: 400000, outputTokens: 120000, timestampMs: t1 - 5000 },
       ],
@@ -384,6 +416,11 @@ async function seedLocalDemoScenario() {
     alice.member_token || alice.memberToken,
     {
       nowMs: t2 - 1000,
+      clientVersion: "1.6.0",
+      deviceId: "dev_alice000002",
+      accountHash: demoAliceHash,
+      accountTier: "ultra",
+      collectionStatus: "active",
       usageEvents: [
         { id: `demo_a3p_${t2}`, modelName: "claude-opus-5-5-high", uncachedInputTokens: 120000, outputTokens: 45000, timestampMs: t2 - 2000 },
       ],
@@ -391,9 +428,27 @@ async function seedLocalDemoScenario() {
     { allowClientNowMs: true }
   );
   await localStore.ingestHeartbeat(
+    bob.member_token || bob.memberToken,
+    {
+      nowMs: t2 - 500,
+      clientVersion: "1.6.0",
+      deviceId: "dev_bob00000001",
+      accountHash: "d4e5f60123456789abcd",
+      collectionStatus: "paused_account_mismatch",
+      usageEvents: [],
+      quotaSnapshots: [],
+    },
+    { allowClientNowMs: true }
+  );
+  await localStore.ingestHeartbeat(
     owner.memberToken,
     {
       nowMs: t2,
+      clientVersion: "1.6.0",
+      deviceId: "dev_owner000001",
+      accountHash: demoOwnerHash,
+      accountTier: "ultra",
+      collectionStatus: "active",
       quotaSnapshots: [
         { poolKey: "3p", windowKey: "weekly", remainingPct: 91.5, resetAt: resetIso, capturedAtMs: t2 },
         { poolKey: "3p", windowKey: "5h", remainingPct: 84.0, resetAt: new Date(now + 3 * 3600 * 1000).toISOString(), capturedAtMs: t2 },
@@ -476,7 +531,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         ok: true,
         app: "agy-family-ledger-console",
-        version: "1.5.0",
+        version: "1.6.0",
         mode: cfg.mode,
         port: PORT,
       });
@@ -544,6 +599,21 @@ const server = http.createServer(async (req, res) => {
       }
       const token = req.headers["x-member-token"] || body.memberToken || "";
       return sendJson(res, await localStore.confirmMemberRules(token, body?.ruleVersion ?? null));
+    }
+
+    if (pathname === "/api/member/me" && method === "GET") {
+      const cfg = loadConsoleConfig();
+      if (cfg.mode === "cloud") {
+        return sendJson(res, { ok: false, error: "管理台已切换为云端同步模式，请改连云端地址" }, 409);
+      }
+      const token =
+        String(req.headers["x-member-token"] || "").trim() ||
+        String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+      if (!token) return sendJson(res, { ok: false, error: "请通过请求头提供成员凭证" }, 401);
+      const row = await localStore.db.first("SELECT id FROM members WHERE member_token = ?", [token]);
+      if (!row) return sendJson(res, { ok: false, error: "无效的成员凭证" }, 401);
+      const member = await localStore.getMemberSelfView(row.id);
+      return sendJson(res, { ok: true, member });
     }
 
     if (pathname === "/api/console-config" && method === "GET") {
@@ -631,7 +701,7 @@ server.listen(PORT, "127.0.0.1", () => {
     JSON.stringify({
       ok: true,
       app: "agy-family-ledger-console",
-      version: "1.5.0",
+      version: "1.6.0",
       url: `http://127.0.0.1:${PORT}`,
       mode: loadConsoleConfig().mode,
     })

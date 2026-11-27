@@ -4,17 +4,23 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MemberLedgerCollector } from "./collector.mjs";
+import { MemberLedgerCollector, SidecarLease } from "./collector.mjs";
 import { UpdateService } from "./update-service.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PANEL_HTML_PATH = path.join(__dirname, "panel.html");
-const CONFIG_PATH = path.join(__dirname, "config.json");
+const CONFIG_PATH = process.env.MEMBER_LEDGER_CONFIG_PATH
+  ? path.resolve(process.env.MEMBER_LEDGER_CONFIG_PATH)
+  : path.join(__dirname, "config.json");
 const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.default.json");
+const STATE_PATH = process.env.MEMBER_LEDGER_STATE_PATH
+  ? path.resolve(process.env.MEMBER_LEDGER_STATE_PATH)
+  : null;
 const PLUGIN_ROOT = path.resolve(__dirname, "..", "..");
 const PANEL_SESSION_TOKEN = crypto.randomBytes(20).toString("hex");
+const IS_HOSTED_SIDECAR = Boolean(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT);
 
 async function loadOfficialSidecarSdk() {
   try {
@@ -35,9 +41,44 @@ function readPanelHtml(injectToken = false) {
   );
 }
 
+const activeTimers = [];
+function registerTimer(id) {
+  activeTimers.push(id);
+  return id;
+}
+function stopAllTimers() {
+  while (activeTimers.length > 0) {
+    const id = activeTimers.pop();
+    try {
+      clearInterval(id);
+      clearTimeout(id);
+    } catch {}
+  }
+}
+
+let sidecarLease = null;
+if (IS_HOSTED_SIDECAR) {
+  sidecarLease = new SidecarLease({ env: process.env });
+  sidecarLease.acquire();
+  sidecarLease.watchOwnership(() => {
+    stopAllTimers();
+    process.exit(0);
+  });
+}
+
 const collector = new MemberLedgerCollector({
   configPath: CONFIG_PATH,
   defaultConfigPath: DEFAULT_CONFIG_PATH,
+  statePath: STATE_PATH,
+  env: process.env,
+  leaseCheckFn: () => (sidecarLease ? sidecarLease.isOwner() : true),
+  onSelfHealRequested: () => {
+    if (!IS_HOSTED_SIDECAR) return;
+    stopAllTimers();
+    sidecarLease?.stop();
+    const exitTimer = setTimeout(() => process.exit(1), 250);
+    if (typeof exitTimer.unref === "function") exitTimer.unref();
+  },
 });
 
 const updateService = new UpdateService({
@@ -65,21 +106,42 @@ function enrichOut(out) {
 }
 
 function startSyncLoop() {
-  setTimeout(() => {
+  // 1. 12 秒本地零流量账号守卫（切号即时停采 + 持续快进 EOF）
+  const initGuard = setTimeout(() => {
+    collector.tickAccountGuard().catch(() => {});
+  }, 800);
+  if (typeof initGuard.unref === "function") initGuard.unref();
+  registerTimer(initGuard);
+
+  const guardLoop = setInterval(() => {
+    collector.tickAccountGuard().catch(() => {});
+  }, 12_000);
+  if (typeof guardLoop.unref === "function") guardLoop.unref();
+  registerTimer(guardLoop);
+
+  // 2. 90 秒云端心跳与增量上报
+  const initSync = setTimeout(() => {
     collector.syncOnce().catch(() => {});
   }, 2500);
-  const intervalMs = Math.max(30_000, (collector.config.syncIntervalSec || 90) * 1000);
-  setInterval(() => {
-    collector.syncOnce().catch(() => {});
-  }, intervalMs).unref();
+  if (typeof initSync.unref === "function") initSync.unref();
+  registerTimer(initSync);
 
-  // 启动后延迟静默检查 GitHub 更新（命中 6 小时缓存时不发网络请求）
-  setTimeout(() => {
+  const intervalMs = Math.max(30_000, (collector.config.syncIntervalSec || 90) * 1000);
+  const syncLoop = setInterval(() => {
+    collector.syncOnce().catch(() => {});
+  }, intervalMs);
+  if (typeof syncLoop.unref === "function") syncLoop.unref();
+  registerTimer(syncLoop);
+
+  // 3. 启动后延迟静默检查 GitHub 更新（命中 6 小时缓存时不发网络请求）
+  const initUpdate = setTimeout(() => {
     collector.maybeReloadConfig();
     if (collector.config.autoCheckUpdates !== false) {
       updateService.checkForUpdates({ force: false }).catch(() => {});
     }
-  }, 5500).unref();
+  }, 5500);
+  if (typeof initUpdate.unref === "function") initUpdate.unref();
+  registerTimer(initUpdate);
 }
 
 function isAllowedLoopbackOrigin(req, port) {
@@ -88,7 +150,7 @@ function isAllowedLoopbackOrigin(req, port) {
   return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
 }
 
-if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
+if (IS_HOSTED_SIDECAR) {
   const { SidecarApp, Response } = await loadOfficialSidecarSdk();
   const app = new SidecarApp();
 
@@ -115,6 +177,50 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
     async () => {
       const out = await collector.syncOnce();
       return jsonResp(enrichOut(out));
+    },
+    "POST"
+  );
+
+  app.api(
+    "/api/pause-toggle",
+    async (data) => {
+      try {
+        const paused = Boolean(data?.paused);
+        collector.setManualPaused(paused);
+        const out = collector.config.serverUrl && collector.config.memberToken
+          ? await collector.syncOnce()
+          : { ok: true };
+        return jsonResp(enrichOut(out));
+      } catch (err) {
+        return jsonResp({ ok: false, error: String(err?.message || err), state: buildFullState() });
+      }
+    },
+    "POST"
+  );
+
+  app.api(
+    "/api/rebind-account",
+    async () => {
+      try {
+        await collector.rebindToCurrentAccount();
+        const out = await collector.syncOnce();
+        return jsonResp(enrichOut(out));
+      } catch (err) {
+        return jsonResp({ ok: false, error: String(err?.message || err), state: buildFullState() });
+      }
+    },
+    "POST"
+  );
+
+  app.api(
+    "/api/retry-identity",
+    async () => {
+      try {
+        const out = await collector.retryIdentityCheck();
+        return jsonResp(enrichOut(out));
+      } catch (err) {
+        return jsonResp({ ok: false, error: String(err?.message || err), state: buildFullState() });
+      }
     },
     "POST"
   );
@@ -254,6 +360,34 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
     if (u.pathname === "/api/sync-now" && req.method === "POST") {
       const out = await collector.syncOnce();
       return sendJson(enrichOut(out));
+    }
+    if (u.pathname === "/api/pause-toggle" && req.method === "POST") {
+      try {
+        collector.setManualPaused(Boolean(body?.paused));
+        const out = collector.config.serverUrl && collector.config.memberToken
+          ? await collector.syncOnce()
+          : { ok: true };
+        return sendJson(enrichOut(out));
+      } catch (err) {
+        return sendJson({ ok: false, error: String(err?.message || err), state: buildFullState() }, 400);
+      }
+    }
+    if (u.pathname === "/api/rebind-account" && req.method === "POST") {
+      try {
+        await collector.rebindToCurrentAccount();
+        const out = await collector.syncOnce();
+        return sendJson(enrichOut(out));
+      } catch (err) {
+        return sendJson({ ok: false, error: String(err?.message || err), state: buildFullState() }, 400);
+      }
+    }
+    if (u.pathname === "/api/retry-identity" && req.method === "POST") {
+      try {
+        const out = await collector.retryIdentityCheck();
+        return sendJson(enrichOut(out));
+      } catch (err) {
+        return sendJson({ ok: false, error: String(err?.message || err), state: buildFullState() }, 400);
+      }
     }
     if (u.pathname === "/api/config" && req.method === "POST") {
       try {

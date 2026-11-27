@@ -1,17 +1,27 @@
 /**
- * Antigravity 家庭组共享额度看板 · 核心纯函数计算引擎 (v1.3.0)
+ * Antigravity 家庭组共享额度看板 · 核心纯函数计算引擎 (v1.6.0)
  *
  * 设计原则：
  * 1. 所有金额使用整数「分」（100 分 = 1.00 元），避免浮点精度误差。
- * 2. Gemini 池与 Claude / 第三方 3P 池分开核算与定价。
+ * 2. Gemini 池与 Claude / 第三方 3P 池分开核算与定价（并自适应 Pro 独立 Argon 池与 Pro/Ultra 档位单位基准）。
  * 3. 多人并发使用时，按「模型倍率 × 缓存折算等效单位」分摊当次官方总池下降量，
  *    并对单人可解释上限设置合理边界，防止未装插件设备的消耗转嫁给在线成员。
- * 4. 自动识别官方配额重置（含离线跨重置周期后的新周期首段消耗），绝不产生负数扣费。
+ * 4. 自动识别官方配额重置（含离线跨重置周期后的新周期首段消耗）与异常锚点回退切换，绝不产生负数扣费或跨号误扣。
  * 5. 未统计消耗预警采用滚动累计窗口，既能捕捉 90 秒心跳下的持续慢速偷跑，又避免单次小抖动误报。
  * 6. 全组使用约定（总池保留底线、单人周期参考上限、适用范围与补充说明）纳入同一套规则版本锁定机制，防暗改、防双标。
  */
 
 export const SLICE_MS = 5 * 60 * 1000; // 5 分钟统计切片
+
+export const ULTRA_EXPECTED_UNITS_PER_PCT = {
+  gemini: 400_000,
+  "3p": 250_000,
+};
+
+export const PRO_EXPECTED_UNITS_PER_PCT = {
+  gemini: 80_000,
+  "3p": 45_000,
+};
 
 export const DEFAULT_SETTINGS = {
   family_name: "家庭组共享额度看板",
@@ -25,6 +35,11 @@ export const DEFAULT_SETTINGS = {
   default_low_balance_fen: 200,
   expected_units_per_pct_gemini: 400_000,
   expected_units_per_pct_3p: 250_000,
+  // 多账号归属锁与套餐自适应 (v1.6.0)
+  account_isolation_mode: "per_member_lock", // 'per_member_lock' | 'shared_owner_account'
+  shared_account_hash: "", // 当 account_isolation_mode === 'shared_owner_account' 时生效的全组唯一 20 位账号指纹
+  plan_tier: "auto", // 'auto' | 'ultra' | 'pro'
+  has_separate_argon_pool: false, // 权威水位上报者是否存在独立未禁用 Argon 桶（Pro 为 true，Ultra 共享池为 false）
   // 全组共享使用约定（0 或空字符串表示不启用，不额外占用界面）
   pool_reserve_floor_pct: 0, // 总池保留底线（周剩余 %，例如 20 表示剩余降至 20% 时提醒暂停重任务）
   member_weekly_cap_pct: 0, // 单人本周期参考上限（%，例如双人组 50、三人组 30）
@@ -43,17 +58,121 @@ export const DEFAULT_SETTINGS = {
   show_peer_shares_to_members: true, // 允许成员看到组内各人的本周期与近 5 小时用量（不含余额与凭证）
 };
 
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+/**
+ * 纯标准 JS 同步 SHA-256（零 Node 专有依赖，Worker / 浏览器 / Node 100% 一致）
+ */
+export function sha256HexSync(input = "") {
+  const bytes = new TextEncoder().encode(String(input ?? ""));
+  const bitLen = bytes.length * 8;
+  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+  const buf = new Uint8Array(paddedLen);
+  buf.set(bytes);
+  buf[bytes.length] = 0x80;
+  const view = new DataView(buf.buffer);
+  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = ((w[i - 15] >>> 7) | (w[i - 15] << 25)) ^ ((w[i - 15] >>> 18) | (w[i - 15] << 14)) ^ (w[i - 15] >>> 3);
+      const s1 = ((w[i - 2] >>> 17) | (w[i - 2] << 15)) ^ ((w[i - 2] >>> 19) | (w[i - 2] << 13)) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+  }
+  return [h0, h1, h2, h3, h4, h5, h6, h7].map((x) => x.toString(16).padStart(8, "0")).join("");
+}
+
+/**
+ * 账号域隔离短指纹：sha256("agy-family-ledger:acct:v1:" + email.trim().toLowerCase()).slice(0, 20)
+ */
+export function computeAccountFingerprint(rawEmail = "") {
+  const clean = String(rawEmail || "").trim().toLowerCase();
+  if (!clean || !clean.includes("@")) return "";
+  return sha256HexSync(`agy-family-ledger:acct:v1:${clean}`).slice(0, 20);
+}
+
+export function normalizeAccountHash(raw = "") {
+  const clean = String(raw || "").trim().toLowerCase();
+  return /^[0-9a-f]{20}$/.test(clean) ? clean : "";
+}
+
+export function maskEmailForLocalDisplay(rawEmail = "") {
+  const clean = String(rawEmail || "").trim().toLowerCase();
+  const atIdx = clean.lastIndexOf("@");
+  if (atIdx <= 0 || atIdx >= clean.length - 1) return "";
+  const localPart = clean.slice(0, atIdx);
+  const domain = clean.slice(atIdx + 1);
+  const prefix = localPart.length <= 2 ? localPart.slice(0, 1) : localPart.slice(0, 3);
+  return `${prefix}***@${domain}`;
+}
+
+export function normalizeAccountTier(raw = "") {
+  const s = String(raw || "").trim().toLowerCase();
+  if (s === "ultra" || s === "pro" || s === "free") return s;
+  return "";
+}
+
+export function normalizeCollectionStatus(raw = "") {
+  const s = String(raw || "").trim().toLowerCase();
+  if (
+    s === "active" ||
+    s === "paused_account_mismatch" ||
+    s === "paused_manual" ||
+    s === "paused_identity_unavailable"
+  ) {
+    return s;
+  }
+  return "active";
+}
+
 /**
  * 归一化模型名称所属池子：'gemini' | '3p'
  */
 export function classifyModelPool(modelName = "") {
   const s = String(modelName || "").trim().toLowerCase();
   if (!s) return "gemini";
-  if (/gemini|gemma|\bneon\b|\bcarbon\b|\bhydrogen\b|\bargon\b|\bflash\b/.test(s)) {
+  if (/gemini|gemma|(?:^|[^a-z0-9])(neon|carbon|hydrogen|argon|flash|orchestrator)(?:$|[^a-z0-9])/.test(s)) {
     return "gemini";
   }
   if (
-    /claude|opus|sonnet|haiku|anthropic|gpt|openai|\bo1\b|\bo3\b|\bo4\b|deepseek|qwen|llama|mistral|^3p/.test(
+    /claude|opus|sonnet|haiku|anthropic|gpt[-_]?oss|gpt|openai|(?:^|[^a-z0-9])(o1|o3|o4)(?:$|[^a-z0-9])|deepseek|qwen|llama|mistral|^3p/.test(
       s
     )
   ) {
@@ -64,15 +183,24 @@ export function classifyModelPool(modelName = "") {
 }
 
 /**
- * 获取模型消耗倍率（对齐 Antigravity 倍率：Carbon 3x、Opus 2x、Argon 1.5x、Sonnet 1.2x、Neon 1x、Hydrogen/Flash 0.7x）
+ * 判断是否为 Argon 模型（用于 Pro 套餐独立 Argon 桶动态隔离）
+ */
+export function isArgonModel(modelName = "") {
+  const s = String(modelName || "").trim().toLowerCase();
+  if (!s) return false;
+  return /(?:^|[^a-z0-9])argon(?:$|[^a-z0-9])/.test(s);
+}
+
+/**
+ * 获取模型消耗倍率（对齐 Antigravity 倍率：Carbon 3x、Opus 2x、Argon 1.5x、Sonnet 1.2x、Neon/Orchestrator 1x、Hydrogen/Flash 0.7x）
  */
 export function getModelMultiplier(modelName = "") {
   const s = String(modelName || "").toLowerCase();
-  if (s.includes("carbon")) return 3.0;
-  if (s.includes("opus")) return 2.0;
-  if (s.includes("argon")) return 1.5;
-  if (s.includes("sonnet")) return 1.2;
-  if (s.includes("hydrogen") || s.includes("flash")) return 0.7;
+  if (/(?:^|[^a-z0-9])carbon(?:$|[^a-z0-9])/.test(s) || s.includes("carbon")) return 3.0;
+  if (/(?:^|[^a-z0-9])opus(?:$|[^a-z0-9])/.test(s) || s.includes("opus")) return 2.0;
+  if (/(?:^|[^a-z0-9])argon(?:$|[^a-z0-9])/.test(s) || s.includes("argon")) return 1.5;
+  if (/(?:^|[^a-z0-9])sonnet(?:$|[^a-z0-9])/.test(s) || s.includes("sonnet")) return 1.2;
+  if (/(?:^|[^a-z0-9])(hydrogen|flash)(?:$|[^a-z0-9])/.test(s) || s.includes("hydrogen") || s.includes("flash")) return 0.7;
   return 1.0;
 }
 
@@ -291,8 +419,10 @@ export function formatPricingRuleSummary(settings = DEFAULT_SETTINGS) {
 }
 
 /**
- * 判断两次配额水位快照之间是「正常消耗下降」还是「官方配额重置回升」
- * 返回：{ dropPct, isReset, resetJumpPct, postResetDropPct }
+ * 判断两次配额水位快照之间是「正常消耗下降」「官方配额重置回升」还是「跨号/异常锚点倒退切换」
+ * 返回：{ dropPct, isReset, isAnchorSwitch, resetJumpPct, postResetDropPct }
+ * - 若 nextResetMs < prevResetMs - 6h（重置时间大幅倒退，典型发生于不同账号或不同计费周期切换），
+ *   返回 isAnchorSwitch: true, dropPct: 0, isReset: false，仅更新锚点，绝不误判重置或扣费。
  * - 当检测到跨周期重置且新周期已经从 100% 消耗至 clampedNext（例如 82%）时，
  *   postResetDropPct 返回 18.0，便于把离线跨重置后的新周期真实消耗入账，不再蒸发。
  */
@@ -300,13 +430,28 @@ export function evaluateQuotaDelta(prevPct, nextPct, prevResetAt = "", nextReset
   const p = Number(prevPct);
   const n = Number(nextPct);
   if (!Number.isFinite(p) || !Number.isFinite(n)) {
-    return { dropPct: 0, isReset: false, resetJumpPct: 0, postResetDropPct: 0 };
+    return { dropPct: 0, isReset: false, isAnchorSwitch: false, resetJumpPct: 0, postResetDropPct: 0 };
   }
   const clampedPrev = Math.max(0, Math.min(100, p));
   const clampedNext = Math.max(0, Math.min(100, n));
 
   const prevResetMs = prevResetAt ? Date.parse(prevResetAt) : NaN;
   const nextResetMs = nextResetAt ? Date.parse(nextResetAt) : NaN;
+
+  const resetTimeRewound =
+    Number.isFinite(prevResetMs) &&
+    Number.isFinite(nextResetMs) &&
+    nextResetMs < prevResetMs - 6 * 3600 * 1000;
+  if (resetTimeRewound) {
+    return {
+      dropPct: 0,
+      isReset: false,
+      isAnchorSwitch: true,
+      resetJumpPct: 0,
+      postResetDropPct: 0,
+    };
+  }
+
   const resetTimeShifted =
     Number.isFinite(prevResetMs) &&
     Number.isFinite(nextResetMs) &&
@@ -318,6 +463,7 @@ export function evaluateQuotaDelta(prevPct, nextPct, prevResetAt = "", nextReset
     return {
       dropPct: 0,
       isReset: true,
+      isAnchorSwitch: false,
       resetJumpPct: Math.round((clampedNext - clampedPrev) * 100) / 100,
       postResetDropPct,
     };
@@ -327,9 +473,32 @@ export function evaluateQuotaDelta(prevPct, nextPct, prevResetAt = "", nextReset
   return {
     dropPct: rawDrop > 0 ? Math.round(rawDrop * 1000) / 1000 : 0,
     isReset: false,
+    isAnchorSwitch: false,
     resetJumpPct: 0,
     postResetDropPct: 0,
   };
+}
+
+/**
+ * 解析当前生效的每 1% 预期等效单位基准（支持 Pro / Ultra 档位自适应，未手动改写默认值时自动适配）
+ */
+export function resolveExpectedUnitsPerPct(poolKey = "gemini", settings = DEFAULT_SETTINGS, effectivePlanTier = "") {
+  const cfg = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  const rawPlanTier = String(cfg.plan_tier || "auto").toLowerCase();
+  const resolvedTier =
+    rawPlanTier === "pro" || rawPlanTier === "ultra"
+      ? rawPlanTier
+      : normalizeAccountTier(effectivePlanTier);
+
+  const is3p = poolKey === "3p";
+  const defaultVal = is3p ? ULTRA_EXPECTED_UNITS_PER_PCT["3p"] : ULTRA_EXPECTED_UNITS_PER_PCT.gemini;
+  const configuredVal = Number(is3p ? cfg.expected_units_per_pct_3p : cfg.expected_units_per_pct_gemini);
+  const hasCustomVal = Number.isFinite(configuredVal) && configuredVal > 0 && configuredVal !== defaultVal;
+  if (hasCustomVal) return configuredVal;
+  if (resolvedTier === "pro") {
+    return is3p ? PRO_EXPECTED_UNITS_PER_PCT["3p"] : PRO_EXPECTED_UNITS_PER_PCT.gemini;
+  }
+  return defaultVal;
 }
 
 /**
@@ -343,6 +512,7 @@ export function allocateSliceUsage({
   poolDropPct = 0,
   memberUsages = [],
   settings = DEFAULT_SETTINGS,
+  effectivePlanTier = "",
 } = {}) {
   const cfg = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const currentRuleVersion = Math.max(1, Number(cfg.rule_version) || 1);
@@ -366,10 +536,7 @@ export function allocateSliceUsage({
     poolKey === "3p"
       ? Number(cfg.third_party_fen_per_million_units) || 200
       : Number(cfg.gemini_fen_per_million_units) || 80;
-  const expectedUnitsPerPct =
-    poolKey === "3p"
-      ? Number(cfg.expected_units_per_pct_3p) || 250_000
-      : Number(cfg.expected_units_per_pct_gemini) || 400_000;
+  const expectedUnitsPerPct = resolveExpectedUnitsPerPct(poolKey, cfg, effectivePlanTier);
 
   if (drop > 0 && totalUnits <= 0) {
     return {

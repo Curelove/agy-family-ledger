@@ -6,12 +6,96 @@ const consoleToken = document.querySelector('meta[name="console-token"]')?.conte
 let currentDash = null;
 let currentConsoleCfg = null;
 let activeTopupMemberId = null;
+let activeLockMemberId = null;
 let activeInviteInfo = null;
+let pendingSharedAccountHash = "";
 let expandedMemberIds = new Set();
 let currentUpdateMeta = null;
 let currentUpdateInfo = null;
 let consoleAutoCheckUpdates = true;
 let consoleStartupUpdateChecked = false;
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexFallback(str) {
+  const bytes = new TextEncoder().encode(String(str ?? ""));
+  const bitLen = bytes.length * 8;
+  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+  const buf = new Uint8Array(paddedLen);
+  buf.set(bytes);
+  buf[bytes.length] = 0x80;
+  const view = new DataView(buf.buffer);
+  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = ((w[i - 15] >>> 7) | (w[i - 15] << 25)) ^ ((w[i - 15] >>> 18) | (w[i - 15] << 14)) ^ (w[i - 15] >>> 3);
+      const s1 = ((w[i - 2] >>> 17) | (w[i - 2] << 15)) ^ ((w[i - 2] >>> 19) | (w[i - 2] << 13)) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0;
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+  }
+  return [h0, h1, h2, h3, h4, h5, h6, h7].map((x) => x.toString(16).padStart(8, "0")).join("");
+}
+
+/**
+ * 在浏览器本地计算账号 20 位短指纹（明文邮箱永不离开浏览器）
+ */
+async function computeAccountFingerprintLocal(rawEmail = "") {
+  const clean = String(rawEmail || "").trim().toLowerCase();
+  if (!clean || !clean.includes("@")) return "";
+  const input = `agy-family-ledger:acct:v1:${clean}`;
+  try {
+    if (globalThis.crypto?.subtle?.digest) {
+      const bytes = new TextEncoder().encode(input);
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0"))
+        .join("")
+        .slice(0, 20);
+    }
+  } catch {}
+  return sha256HexFallback(input).slice(0, 20);
+}
+
+function fmtCollectionStatusLabel(status) {
+  if (status === "paused_account_mismatch") return "切号已暂停";
+  if (status === "paused_manual") return "手动已暂停";
+  if (status === "paused_identity_unavailable") return "本地接口未连通";
+  return "活跃统计中";
+}
+
+function fmtTierBadge(tier) {
+  if (tier === "ultra") return "Ultra";
+  if (tier === "pro") return "Pro";
+  if (tier === "free") return "Free";
+  return "";
+}
 
 function showToast(msg) {
   const el = $("toast");
@@ -112,14 +196,54 @@ function renderMemberList(members) {
       const tags = [];
       if (isOwner) tags.push('<span class="role-tag">我自己</span>');
       if (isPaused) tags.push('<span class="role-tag warn">已暂停</span>');
+      if (!isArchived && m.collectionStatus === "paused_account_mismatch") {
+        tags.push('<span class="role-tag pine">切号暂停</span>');
+      } else if (!isArchived && m.collectionStatus === "paused_manual") {
+        tags.push('<span class="role-tag muted">手动暂停</span>');
+      } else if (!isArchived && m.collectionStatus === "paused_identity_unavailable") {
+        tags.push('<span class="role-tag warn">接口未连通</span>');
+      }
+      if (!isArchived && Number(m.onlineDeviceCount || 0) > 1) {
+        tags.push(`<span class="role-tag pine">${Number(m.onlineDeviceCount)} 台设备</span>`);
+      }
+      if (!isArchived && m.isLegacyClient) {
+        tags.push(`<span class="role-tag muted" title="升级到 v1.6.0 后支持切号防混账">v${escapeHtml(m.lastClientVersion)}</span>`);
+      }
       if (!isArchived && m.needsRuleConfirm) tags.push('<span class="role-tag warn">待确认新规则</span>');
       if (!isArchived && m.poolViolated) tags.push('<span class="role-tag warn">误用 3P</span>');
       if (!isArchived && m.capReached) tags.push('<span class="role-tag warn">已达上限参考</span>');
 
-      const h5Desc =
-        h5G > 0 || h5P > 0
-          ? `Gemini ${h5G.toFixed(0)}% · 3P ${h5P.toFixed(0)}%（${m.recent5h?.requests5h || 0} 次）`
-          : "近 5 小时暂无记录";
+      const h5Parts = [];
+      if (h5G > 0) h5Parts.push(`Gemini ${h5G.toFixed(0)}%`);
+      if (h5P > 0) h5Parts.push(`3P ${h5P.toFixed(0)}%`);
+      const h5Desc = h5Parts.length
+        ? `${h5Parts.join(" · ")}（${m.recent5h?.requests5h || 0} 次）`
+        : "近 5 小时暂无记录";
+
+      const lockDesc = m.boundAccountHash
+        ? `#${m.boundAccountHash.slice(0, 8)}…（${m.boundAccountLockedByAdmin ? "组长预锁" : "自动锁定"}）`
+        : "尚未锁定（首次同步自动锁定）";
+      const tierStr = fmtTierBadge(m.accountTier);
+      const devicesList = Array.isArray(m.devices) ? m.devices : [];
+      const devicePillsHtml = devicesList.length
+        ? `<div class="device-pills">${devicesList
+            .slice(0, 4)
+            .map((d) => {
+              const stLabel =
+                d.collectionStatus === "paused_account_mismatch"
+                  ? "切号暂停"
+                  : d.collectionStatus === "paused_manual"
+                  ? "手动暂停"
+                  : d.online
+                  ? "在线"
+                  : "离线";
+              return `<span class="device-pill ${d.online ? "on" : ""}" title="${escapeHtml(d.deviceId)}">设备 #${escapeHtml(d.deviceId.slice(-4))} · ${stLabel}</span>`;
+            })
+            .join("")}</div>`
+        : "";
+      const legacyHint = m.isLegacyClient
+        ? `<span>客户端 <strong>v${escapeHtml(m.lastClientVersion)}</strong>（升级后支持切号防混账）</span>`
+        : "";
 
       return `
         <article class="member-card ${lowCls} ${archCls} ${isOpen ? "open" : ""}" data-member-id="${escapeHtml(m.id)}">
@@ -157,10 +281,18 @@ function renderMemberList(members) {
                 <div class="dv">${h5Desc}</div>
               </div>
             </div>
+            <div class="drawer-meta-strip">
+              <span>账号锁：<strong>${escapeHtml(lockDesc)}</strong>${tierStr ? ` · ${tierStr}` : ""}</span>
+              <span>采集状态：<strong>${fmtCollectionStatusLabel(m.collectionStatus)}</strong></span>
+              ${devicesList.length > 0 ? `<span>设备：${Number(m.onlineDeviceCount || 0)} / ${devicesList.length} 台</span>` : ""}
+              ${devicePillsHtml}
+              ${legacyHint}
+            </div>
             <div class="drawer-token-bar">
-              <span class="token-code">规则已确认 v${Number(m.acceptedRuleVersion || 1)} · 近 7 天 ${m.requests7d || 0} 次请求</span>
+              <span class="token-code">规则已确认 v${Number(m.acceptedRuleVersion || 1)} · 近 7 天 ${m.requests7d || 0} 次请求${m.lastClientVersion ? ` · v${escapeHtml(m.lastClientVersion)}` : ""}</span>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
                 ${!isArchived ? `<button class="btn-soft" data-op="invite" data-id="${escapeHtml(m.id)}">查看绑定码</button>` : ""}
+                ${!isArchived ? `<button class="btn-soft" data-op="account-lock" data-id="${escapeHtml(m.id)}">账号锁</button>` : ""}
                 ${!isOwner && !isArchived ? `<button class="btn-soft" data-op="toggle-pause" data-id="${escapeHtml(m.id)}" data-paused="${isPaused ? "1" : "0"}">${isPaused ? "恢复同步" : "暂停同步"}</button>` : ""}
                 ${!isOwner && !isArchived ? `<button class="btn-soft" data-op="rotate-token" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">重置绑定码</button>` : ""}
                 ${!isOwner && !isArchived ? `<button class="btn-danger-soft" data-op="delete" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">停用移除</button>` : ""}
@@ -287,6 +419,22 @@ function syncSettingsFormVisibility() {
 
   const selectedConsoleMode = document.querySelector('input[name="console-mode"]:checked')?.value || "local";
   $("cloud-cfg-box").hidden = selectedConsoleMode !== "cloud";
+
+  const selectedIsoMode = document.querySelector('input[name="account-isolation-mode"]:checked')?.value || "per_member_lock";
+  $("shared-account-box").hidden = selectedIsoMode !== "shared_owner_account";
+}
+
+function renderSharedHashStatus() {
+  const el = $("shared-hash-status");
+  const clearBtn = $("btn-clear-shared-hash");
+  if (!el) return;
+  if (pendingSharedAccountHash) {
+    el.textContent = `当前已锁全组共享指纹：#${pendingSharedAccountHash.slice(0, 10)}…（20 位短指纹）`;
+    if (clearBtn) clearBtn.hidden = false;
+  } else {
+    el.textContent = "尚未设定共享账号指纹，可点击下方按钮锁定组长当前账号或输入共享邮箱生成。";
+    if (clearBtn) clearBtn.hidden = true;
+  }
 }
 
 function updatePricePreview() {
@@ -410,6 +558,29 @@ function applyDashboard(dash) {
   $("set-usage-note").value = s.usage_rule_note || "";
   $("set-warn-pct").value = Number(s.blackhole_warn_missing_pct) || 5;
   $("set-crit-pct").value = Number(s.blackhole_critical_missing_pct) || 15;
+
+  // 回填多账号归属锁与套餐档位
+  const isoMode = s.account_isolation_mode === "shared_owner_account" ? "shared_owner_account" : "per_member_lock";
+  for (const r of document.querySelectorAll('input[name="account-isolation-mode"]')) {
+    r.checked = r.value === isoMode;
+  }
+  pendingSharedAccountHash = String(s.shared_account_hash || "");
+  renderSharedHashStatus();
+  const ownerHash = String(sum.ownerBoundAccountHash || "");
+  const lockOwnerBtn = $("btn-lock-owner-account");
+  if (lockOwnerBtn) {
+    lockOwnerBtn.textContent = ownerHash
+      ? `一键锁定组长当前账号 (#${ownerHash.slice(0, 6)}…)`
+      : "一键锁定组长当前账号（需组长先同步）";
+  }
+  $("set-plan-tier").value = s.plan_tier === "pro" || s.plan_tier === "ultra" ? s.plan_tier : "auto";
+  const detectedTier = fmtTierBadge(sum.ownerAccountTier || sum.effectivePlanTier || "");
+  const argonNote = s.has_separate_argon_pool
+    ? "已自动识别 Pro 独立 Argon 桶，Argon 用量不混入普通 Gemini 周池分摊。"
+    : "当前 Argon 与 Gemini 共享周池（Ultra 模式），按 1.5x 正常分摊。";
+  $("plan-tier-hint").textContent =
+    (detectedTier ? `已检测到组长当前档位：${detectedTier}。` : "尚未检测到组长档位，默认按 Ultra 基准计算。") + argonNote;
+
   updatePricePreview();
   updateUsageRulePreview();
   syncSettingsFormVisibility();
@@ -456,6 +627,18 @@ async function openInviteModal(memberId) {
     $("inv-terms-summary").textContent = info.termsSummary || "纯看板模式";
     $("inv-releases-link").href = info.releasesUrl;
     $("invite-local-warn").hidden = !info.isLocalOnly;
+    const lockNote = $("inv-account-lock-note");
+    if (lockNote) {
+      if (info.targetAccountHash) {
+        lockNote.hidden = false;
+        lockNote.textContent =
+          info.accountIsolationMode === "shared_owner_account"
+            ? `绑定码已内置全组共享账号指纹锁（#${info.targetAccountHash.slice(0, 8)}…），成员挂在其他个人号上粘贴也会自动暂停防绑错。`
+            : `绑定码已内置该成员预锁账号指纹（#${info.targetAccountHash.slice(0, 8)}…），仅统计匹配的家庭组账号。`;
+      } else {
+        lockNote.hidden = true;
+      }
+    }
     $("modal-invite").hidden = false;
   } catch (err) {
     showToast(err.message);
@@ -487,7 +670,7 @@ document.querySelectorAll(".index-tab").forEach((btn) => {
   });
 });
 
-document.querySelectorAll('input[name="ledger-mode"], input[name="console-mode"]').forEach((el) => {
+document.querySelectorAll('input[name="ledger-mode"], input[name="console-mode"], input[name="account-isolation-mode"]').forEach((el) => {
   el.addEventListener("change", syncSettingsFormVisibility);
 });
 
@@ -519,6 +702,20 @@ document.addEventListener("click", async (e) => {
       await handleInstallOwner();
     } else if (op === "invite") {
       await openInviteModal(id);
+    } else if (op === "account-lock") {
+      const m = (currentDash?.members || []).find((x) => x.id === id);
+      if (!m) return;
+      activeLockMemberId = id;
+      $("lock-member-name").textContent = m.name;
+      $("lock-current-status").textContent = m.boundAccountHash
+        ? `当前已锁指纹：#${m.boundAccountHash.slice(0, 10)}…（${m.boundAccountLockedByAdmin ? "组长后台预锁，成员端不可自助换绑" : "成员首次同步自动锁定"}）`
+        : "当前尚未锁定账号指纹（成员首次同步时将自动锁定当时登录的账号）。";
+      $("edit-lock-email").value = "";
+      $("edit-lock-hash-preview").textContent = "输入完整邮箱后将实时显示 20 位不可逆短指纹";
+      $("edit-lock-hash-preview").className = "hash-preview-line";
+      $("btn-clear-member-lock").hidden = !Boolean(m.boundAccountHash);
+      $("modal-account-lock").hidden = false;
+      $("edit-lock-email").focus();
     } else if (op === "topup") {
       const m = (currentDash?.members || []).find((x) => x.id === id);
       if (!m) return;
@@ -613,14 +810,61 @@ $("btn-jump-rules").addEventListener("click", () => {
 $("btn-open-add-member").addEventListener("click", () => {
   $("add-name").value = "";
   $("add-note").value = "";
+  $("add-lock-email").value = "";
+  $("add-lock-hash-preview").textContent = "填后将锁定该成员仅统计指定邮箱，防止首次绑定挂错个人号。";
+  $("add-lock-hash-preview").className = "hash-preview-line";
   $("add-prepaid-fields").hidden = !isPrepaidMode();
   $("modal-add-member").hidden = false;
   $("add-name").focus();
 });
 
+async function bindEmailHashPreview(inputId, previewId, emptyHint) {
+  const inputEl = $(inputId);
+  const previewEl = $(previewId);
+  if (!inputEl || !previewEl) return;
+  inputEl.addEventListener("input", async () => {
+    const raw = inputEl.value.trim();
+    if (!raw) {
+      previewEl.textContent = emptyHint;
+      previewEl.className = "hash-preview-line";
+      return;
+    }
+    const h = await computeAccountFingerprintLocal(raw);
+    if (!h) {
+      previewEl.textContent = "请输入包含 @ 的完整邮箱地址以计算本地短指纹";
+      previewEl.className = "hash-preview-line";
+      return;
+    }
+    previewEl.textContent = `本地短指纹预览：#${h}（仅上传此 20 位不可逆哈希，明文邮箱不离开浏览器）`;
+    previewEl.className = "hash-preview-line ready";
+  });
+}
+
+void bindEmailHashPreview(
+  "add-lock-email",
+  "add-lock-hash-preview",
+  "填后将锁定该成员仅统计指定邮箱，防止首次绑定挂错个人号。"
+);
+void bindEmailHashPreview(
+  "edit-lock-email",
+  "edit-lock-hash-preview",
+  "输入完整邮箱后将实时显示 20 位不可逆短指纹"
+);
+void bindEmailHashPreview(
+  "set-shared-email",
+  "shared-email-hash-preview",
+  "留空则保持上方已锁指纹不变"
+);
+
 $("btn-confirm-add-member").addEventListener("click", async () => {
   const name = $("add-name").value.trim();
   if (!name) return showToast("请先填写成员称呼");
+  const rawEmail = $("add-lock-email").value.trim();
+  let boundAccountHash = "";
+  if (rawEmail) {
+    boundAccountHash = await computeAccountFingerprintLocal(rawEmail);
+    if (!boundAccountHash) return showToast("预锁邮箱格式不正确，需包含 @ 或留空");
+  }
   const prepaid = isPrepaidMode();
   try {
     const out = await api("/api/admin/members", {
@@ -631,13 +875,101 @@ $("btn-confirm-add-member").addEventListener("click", async () => {
         initialBalanceFen: prepaid ? Math.round((Number($("add-init-yuan").value) || 0) * 100) : 0,
         lowBalanceFen: prepaid ? Math.round((Number($("add-low-yuan").value) || 2) * 100) : 200,
         note: $("add-note").value.trim(),
+        boundAccountHash,
+        boundAccountLockedByAdmin: Boolean(boundAccountHash),
       }),
     });
+    $("add-lock-email").value = "";
     $("modal-add-member").hidden = true;
     await refreshAll();
     if (out.member?.id) {
       await openInviteModal(out.member.id);
     }
+  } catch (err) {
+    showToast(err.message);
+  }
+});
+
+$("btn-save-member-lock").addEventListener("click", async () => {
+  if (!activeLockMemberId) return;
+  const rawEmail = $("edit-lock-email").value.trim();
+  if (!rawEmail) return showToast("请先输入该成员的家庭组邮箱");
+  const hash = await computeAccountFingerprintLocal(rawEmail);
+  if (!hash) return showToast("邮箱格式不正确，需包含 @");
+  try {
+    await api(`/api/admin/members/${encodeURIComponent(activeLockMemberId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ boundAccountHash: hash, boundAccountLockedByAdmin: true }),
+    });
+    $("edit-lock-email").value = "";
+    $("modal-account-lock").hidden = true;
+    showToast(`已锁定成员账号指纹 (#${hash.slice(0, 8)}…)`);
+    await refreshAll();
+  } catch (err) {
+    showToast(err.message);
+  }
+});
+
+$("btn-clear-member-lock").addEventListener("click", async () => {
+  if (!activeLockMemberId) return;
+  try {
+    await api(`/api/admin/members/${encodeURIComponent(activeLockMemberId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ clearAccountLock: true }),
+    });
+    $("edit-lock-email").value = "";
+    $("modal-account-lock").hidden = true;
+    showToast("已清除该成员账号锁，允许其重新绑定账号");
+    await refreshAll();
+  } catch (err) {
+    showToast(err.message);
+  }
+});
+
+$("btn-lock-owner-account").addEventListener("click", () => {
+  const ownerHash = String(currentDash?.summary?.ownerBoundAccountHash || "");
+  if (!ownerHash) {
+    return showToast("组长插件尚未同步到当前账号指纹，请先打开 Antigravity 侧边栏同步一次");
+  }
+  pendingSharedAccountHash = ownerHash;
+  $("set-shared-email").value = "";
+  $("shared-email-hash-preview").textContent = "已选定组长当前同步账号指纹，点击下方「保存账号锁与档位」即可生效";
+  $("shared-email-hash-preview").className = "hash-preview-line ready";
+  renderSharedHashStatus();
+});
+
+$("btn-clear-shared-hash").addEventListener("click", () => {
+  pendingSharedAccountHash = "";
+  $("set-shared-email").value = "";
+  $("shared-email-hash-preview").textContent = "已清空共享指纹，保存后生效";
+  $("shared-email-hash-preview").className = "hash-preview-line";
+  renderSharedHashStatus();
+});
+
+$("btn-save-isolation").addEventListener("click", async () => {
+  const mode = document.querySelector('input[name="account-isolation-mode"]:checked')?.value || "per_member_lock";
+  const planTier = $("set-plan-tier").value || "auto";
+  const typedEmail = $("set-shared-email").value.trim();
+  let finalSharedHash = pendingSharedAccountHash;
+  if (mode === "shared_owner_account" && typedEmail) {
+    finalSharedHash = await computeAccountFingerprintLocal(typedEmail);
+    if (!finalSharedHash) return showToast("共享邮箱格式不正确，需包含 @");
+  }
+  if (mode === "shared_owner_account" && !finalSharedHash) {
+    return showToast("开启「全组共用同一登录账号」需先锁定组长账号或输入共享邮箱");
+  }
+  try {
+    await api("/api/admin/settings", {
+      method: "PATCH",
+      body: JSON.stringify({
+        account_isolation_mode: mode,
+        shared_account_hash: mode === "shared_owner_account" ? finalSharedHash : "",
+        plan_tier: planTier,
+      }),
+    });
+    $("set-shared-email").value = "";
+    showToast("账号归属锁与套餐档位已保存");
+    await refreshAll();
   } catch (err) {
     showToast(err.message);
   }
@@ -762,7 +1094,7 @@ $("btn-demo-seed").addEventListener("click", async () => {
 });
 
 function renderConsoleUpdateUi() {
-  const curVer = String(currentUpdateMeta?.version || "1.4.0");
+  const curVer = String(currentUpdateMeta?.version || "1.6.0");
   const fallbackRel = String(currentUpdateMeta?.releasesUrl || "https://github.com/Curelove/agy-family-ledger/releases");
   $("console-cur-ver-badge").textContent = "v" + curVer;
   $("console-releases-link").href = currentUpdateInfo?.releasesUrl || fallbackRel;
@@ -865,7 +1197,7 @@ async function checkConsoleUpdates(force = false) {
       if (force) {
         if (!res.ok) showToast(res.error || "更新检查未连通");
         else if (res.updateAvailable) showToast("发现新版本 v" + res.latestVersion);
-        else showToast("当前已是最新版本 v" + (res.currentVersion || currentUpdateMeta?.version || "1.4.0"));
+        else showToast("当前已是最新版本 v" + (res.currentVersion || currentUpdateMeta?.version || "1.6.0"));
       }
     }
   } catch (err) {
