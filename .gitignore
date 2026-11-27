@@ -5,6 +5,7 @@ backups/
 dist/
 member-plugin/sidecars/ledger/config.json
 worker/wrangler.toml
+docs/specs/
 
 # 本机编译产物与桌面快捷方式
 local-console/*.exe

@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS slice_allocations (
   FOREIGN KEY (member_id) REFERENCES members(id)
 );
 CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_week ON slice_allocations (member_id, week_bucket);
+CREATE INDEX IF NOT EXISTS idx_slice_alloc_pool_week ON slice_allocations (pool_key, week_bucket, member_id);
+CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_created ON slice_allocations (member_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_slice_alloc_time ON slice_allocations (slice_start_ms);
 
 -- 成员资金流水（充值、手动调账、退款）
@@ -120,3 +122,5 @@ CREATE TABLE IF NOT EXISTS alerts (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts (acknowledged, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts (kind, pool_key, member_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_qq ON alerts (qq_notified, created_at);

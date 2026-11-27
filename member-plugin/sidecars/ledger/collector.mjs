@@ -2060,15 +2060,18 @@ export class MemberLedgerCollector {
     const isActiveMatch = guard.state === COLLECTION_STATES.ACTIVE_MATCH && !guard.transientHold;
     const collectionStatus = stateToClientStatus(guard.state);
 
-    // 水位防串号第一道防线：仅在 ACTIVE_MATCH 且身份核验通过时拉取并发送官方水位快照
+    // 水位防串号第一道防线：仅在 ACTIVE_MATCH 且身份核验通过时拉取并发送官方水位快照，拉取后二次复核身份未发生毫秒级切号
     let quotaSnapshots = [];
     let hasSeparateArgonPool = undefined;
     if (isActiveMatch && guard.identityVerified) {
       const qRes = await this._queryLocalQuotaSnapshots();
       if (this.leaseCheckFn() && qRes.ok && Array.isArray(qRes.snapshots) && qRes.snapshots.length > 0) {
-        quotaSnapshots = qRes.snapshots;
-        hasSeparateArgonPool = Boolean(qRes.hasSeparateArgonPool);
-        this.state.lastLocalSnapshots = qRes.snapshots;
+        const postLs = await this._queryLocalUserStatus();
+        if (this.leaseCheckFn() && postLs.ok && postLs.loggedIn && postLs.accountHash === guard.accountHash) {
+          quotaSnapshots = qRes.snapshots;
+          hasSeparateArgonPool = Boolean(qRes.hasSeparateArgonPool);
+          this.state.lastLocalSnapshots = qRes.snapshots;
+        }
       }
     }
 

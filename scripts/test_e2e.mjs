@@ -2119,6 +2119,144 @@ try {
     }
   });
 
+  // 30. 红队终审加固：D1 零全表扫描（EXPLAIN QUERY PLAN）+ 水位拉取中毫秒级切号拦截 + Pro 独立 Argon 封账
+  await test("redteam:d1-zero-full-table-scan-and-mid-rpc-switch-and-argon-seal", async () => {
+    let t = Date.parse("2026-12-05T10:00:00Z");
+    const dbOpt = new DatabaseSync(":memory:");
+    const storeOpt = new LedgerStore(wrapNodeSqliteAdapter(dbOpt), { nowFn: () => t });
+    await storeOpt.ensureSchema(SCHEMA_SQL);
+
+    // 验证冷启动第二次 ensureSchema 走 _internal_schema_ver 快速路径（仅 1 次查询，零 DDL）
+    let execCount = 0;
+    const origExec = storeOpt.db.exec.bind(storeOpt.db);
+    storeOpt.db.exec = async (sql) => {
+      execCount += 1;
+      return await origExec(sql);
+    };
+    await storeOpt.ensureSchema(SCHEMA_SQL);
+    assert.equal(execCount, 0, "已升级到最新版本的数据库在 Worker 冷启动时必须跳过重复 DDL");
+
+    // 验证高频心跳核心 SQL 100% 走复合索引（EXPLAIN QUERY PLAN 零 SCAN 全表扫描）
+    const plansToCheck = [
+      {
+        label: "computeRecent5hStats",
+        sql: `SELECT member_id, pool_key, SUM(weighted_units) AS total_units, SUM(request_count) AS reqs
+                FROM usage_reports
+               WHERE slice_start_ms >= ?
+                 AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
+               GROUP BY +member_id, +pool_key`,
+        params: [t - 5 * 3600 * 1000 - 300_000, t - 5 * 3600 * 1000],
+      },
+      {
+        label: "peerAllocsByPoolWeek",
+        sql: `SELECT member_id, pool_key, SUM(attributed_pct) AS total_pct
+                FROM slice_allocations
+               WHERE (pool_key = 'gemini' AND week_bucket = ?) OR (pool_key = '3p' AND week_bucket = ?)
+               GROUP BY +member_id, +pool_key`,
+        params: ["rst_2026-12-10T00:00:00Z", "rst_2026-12-10T00:00:00Z"],
+      },
+      {
+        label: "recentMemberAllocations",
+        sql: `SELECT id, pool_key FROM slice_allocations WHERE member_id = ? ORDER BY created_at DESC LIMIT 20`,
+        params: ["owner_self"],
+      },
+      {
+        label: "insertAlertDedup",
+        sql: `SELECT id FROM alerts WHERE kind = ? AND pool_key = ? AND member_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1`,
+        params: ["blackhole_warn", "gemini", "", "2026-12-05T09:30:00.000Z"],
+      },
+    ];
+    for (const q of plansToCheck) {
+      const planRows = dbOpt.prepare(`EXPLAIN QUERY PLAN ${q.sql}`).all(...q.params);
+      const detailText = planRows.map((r) => String(r.detail || "")).join(" | ");
+      assert.ok(!/\bSCAN\s+(usage_reports|slice_allocations|alerts)\b/i.test(detailText), `${q.label} 不得触发全表扫描: ${detailText}`);
+      assert.ok(/\bSEARCH\b/i.test(detailText), `${q.label} 必须命中索引 SEARCH: ${detailText}`);
+    }
+
+    // 验证 Pro 独立 Argon 桶开启时，被排除的 Argon 记录会被封账为负快照 ID（不残留 NULL）
+    const d0 = await storeOpt.getAdminDashboard(t);
+    const own = d0.members.find((m) => m.role === "owner");
+    const proMem = await storeOpt.createMember({ name: "Pro成员", initialBalanceFen: 1000 });
+    await storeOpt.ingestHeartbeat(own.memberToken, {
+      accountHash: collectorAccountHash("owner.pro@example.com"),
+      accountTier: "pro",
+      hasSeparateArgonPool: true,
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 90, resetAt: "2026-12-10T00:00:00Z", capturedAtMs: t }],
+    });
+    t += 60_000;
+    await storeOpt.ingestHeartbeat(proMem.member_token, {
+      usageEvents: [
+        { id: "argon_step:s1", modelName: "gemini-4-argon-high", uncachedInputTokens: 50000, outputTokens: 5000, timestampMs: t },
+      ],
+    });
+    t += 60_000;
+    await storeOpt.ingestHeartbeat(own.memberToken, {
+      accountHash: collectorAccountHash("owner.pro@example.com"),
+      accountTier: "pro",
+      hasSeparateArgonPool: true,
+      quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 89, resetAt: "2026-12-10T00:00:00Z", capturedAtMs: t }],
+    });
+    const argonRow = await storeOpt.db.first("SELECT settled_snapshot_id FROM usage_reports WHERE member_id = ?", [proMem.id]);
+    assert.ok(Number(argonRow?.settled_snapshot_id) < 0, "Pro 独立 Argon 桶下被跳过的记录必须以负快照 ID 封账");
+
+    // 验证水位 RPC 执行瞬间发生毫秒级切号（GetUserStatus 事前为 A，RetrieveUserQuotaSummary 返回 B 的 100%，事后复核变为 B）-> 客户端原子丢弃快照
+    let receivedQuotas = [];
+    const mockSrv = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const body = JSON.parse(raw || "{}");
+        if (Array.isArray(body.quotaSnapshots) && body.quotaSnapshots.length > 0) {
+          receivedQuotas.push(...body.quotaSnapshots);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, member: { id: "owner_self", role: "owner", pricing: { ruleVersion: 1 } } }));
+      });
+    });
+    await new Promise((r) => mockSrv.listen(0, "127.0.0.1", r));
+    const srvPort = mockSrv.address().port;
+    try {
+      const workMid = path.join(tmpDir, "rt-mid-rpc");
+      fs.mkdirSync(workMid, { recursive: true });
+      const cfgMid = path.join(workMid, "config.json");
+      const hashA = collectorAccountHash("family.a@example.com");
+      const hashB = collectorAccountHash("personal.b@example.com");
+      fs.writeFileSync(
+        cfgMid,
+        JSON.stringify({
+          serverUrl: `http://127.0.0.1:${srvPort}`,
+          memberToken: "agf_mid_rpc_token",
+          boundAccountHash: hashA,
+          boundAccountMasked: "fam***@example.com",
+        }),
+        "utf8"
+      );
+      let userCallIdx = 0;
+      const colMid = new MemberLedgerCollector({
+        configPath: cfgMid,
+        defaultConfigPath: path.join(workMid, "config.default.json"),
+        statePath: path.join(workMid, "state.json"),
+        transcriptRoots: [workMid],
+        fetchUserStatusImpl: async () => {
+          userCallIdx += 1;
+          // 第 1 次（tickAccountGuard）在 A 号，第 2 次（水位拉取后原子复核）已切到 B 号
+          return userCallIdx === 1
+            ? { ok: true, loggedIn: true, accountHash: hashA, accountMasked: "fam***@example.com", accountTier: "ultra" }
+            : { ok: true, loggedIn: true, accountHash: hashB, accountMasked: "per***@example.com", accountTier: "pro" };
+        },
+        fetchQuotaImpl: async () => ({
+          ok: true,
+          hasSeparateArgonPool: true,
+          snapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 100, resetAt: "2026-12-09T00:00:00Z", capturedAtMs: Date.now() }],
+        }),
+      });
+      await colMid.syncOnce();
+      assert.equal(receivedQuotas.length, 0, "水位拉取瞬间发生切号时，客户端后置原子复核必须丢弃快照");
+    } finally {
+      mockSrv.close();
+    }
+  });
+
   console.log(`\nALL E2E TESTS PASSED (${passed}/${passed})`);
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });

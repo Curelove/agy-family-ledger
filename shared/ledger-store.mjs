@@ -27,6 +27,9 @@ import {
 
 const BLACKHOLE_BUFFER_KEY = "_internal_blackhole_buffer";
 const PRUNE_META_KEY = "_internal_last_prune_ms";
+const SCHEMA_VER_KEY = "_internal_schema_ver";
+const CURRENT_SCHEMA_VER = 161;
+const SLICE_MS = 5 * 60 * 1000;
 const RULE_PRICING_KEYS = [
   "ledger_mode",
   "pricing_mode",
@@ -183,6 +186,16 @@ export class LedgerStore {
   }
 
   async ensureSchema(schemaSql) {
+    // 快速路径：若数据库已处于最新结构版本（如 Cloudflare Worker 冷启动新实例），仅用 1 次主键查询跳过全部 DDL 与 ALTER
+    try {
+      const verRow = await this.db.first("SELECT value FROM settings WHERE key = ?", [SCHEMA_VER_KEY]);
+      if (verRow?.value && Number(JSON.parse(verRow.value)) >= CURRENT_SCHEMA_VER) {
+        return;
+      }
+    } catch {
+      // 首次空库尚未建 settings 表时自然落入完整初始化流程
+    }
+
     if (schemaSql) {
       await this.db.exec(schemaSql);
     }
@@ -207,16 +220,20 @@ export class LedgerStore {
       }
     }
 
-    // 补齐全部查询与结算所需索引及审计表
+    // 补齐全部查询与结算所需复合索引及审计表（杜绝 D1 高频心跳全表扫描）
     const extraDdl = `
       CREATE INDEX IF NOT EXISTS idx_usage_reports_slice_pool ON usage_reports (slice_start_ms, pool_key);
       CREATE INDEX IF NOT EXISTS idx_usage_reports_member ON usage_reports (member_id, slice_start_ms);
       CREATE INDEX IF NOT EXISTS idx_usage_reports_unsettled ON usage_reports (pool_key, settled_snapshot_id, slice_start_ms);
       CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots (pool_key, window_key, captured_at_ms);
       CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_week ON slice_allocations (member_id, week_bucket);
+      CREATE INDEX IF NOT EXISTS idx_slice_alloc_pool_week ON slice_allocations (pool_key, week_bucket, member_id);
+      CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_created ON slice_allocations (member_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_slice_alloc_time ON slice_allocations (slice_start_ms);
       CREATE INDEX IF NOT EXISTS idx_transactions_member ON transactions (member_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts (acknowledged, created_at);
+      CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts (kind, pool_key, member_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_alerts_qq ON alerts (qq_notified, created_at);
       CREATE TABLE IF NOT EXISTS rule_changes (
         id TEXT PRIMARY KEY,
         rule_version INTEGER NOT NULL,
@@ -252,14 +269,26 @@ export class LedgerStore {
         note: "组长本人设备安装插件后自动计入全组占比，不参与扣费",
       });
     }
+
+    await this.db.run(
+      "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+      [SCHEMA_VER_KEY, JSON.stringify(CURRENT_SCHEMA_VER), nowIso]
+    );
   }
 
   async getSettings() {
     const rows = await this.db.all("SELECT key, value FROM settings");
     const out = { ...DEFAULT_SETTINGS };
     let hasExplicitLedgerMode = false;
+    let lastPruneMs = 0;
     for (const r of rows) {
-      if (r.key === BLACKHOLE_BUFFER_KEY || r.key === PRUNE_META_KEY) continue;
+      if (r.key === PRUNE_META_KEY) {
+        try {
+          lastPruneMs = Number(JSON.parse(r.value)) || 0;
+        } catch {}
+        continue;
+      }
+      if (r.key === BLACKHOLE_BUFFER_KEY || r.key === SCHEMA_VER_KEY) continue;
       if (r.key === "ledger_mode") hasExplicitLedgerMode = true;
       try {
         out[r.key] = JSON.parse(r.value);
@@ -283,6 +312,7 @@ export class LedgerStore {
     out.plan_tier =
       out.plan_tier === "pro" || out.plan_tier === "ultra" ? out.plan_tier : "auto";
     out.has_separate_argon_pool = Boolean(out.has_separate_argon_pool);
+    Object.defineProperty(out, "_lastPruneMs", { value: lastPruneMs, enumerable: false });
     return out;
   }
 
@@ -439,14 +469,20 @@ export class LedgerStore {
     );
   }
 
-  async maybePruneOldData(nowMs = this.nowFn()) {
+  async maybePruneOldData(nowMs = this.nowFn(), preloadedSettings = null) {
     try {
-      const row = await this.db.first("SELECT value FROM settings WHERE key = ?", [PRUNE_META_KEY]);
-      const lastPruneMs = row?.value ? Number(JSON.parse(row.value)) : 0;
-      if (Number.isFinite(lastPruneMs) && nowMs - lastPruneMs < 12 * 3600 * 1000) return;
+      let lastPruneMs = Number(preloadedSettings?._lastPruneMs || 0);
+      if (!preloadedSettings) {
+        const row = await this.db.first("SELECT value FROM settings WHERE key = ?", [PRUNE_META_KEY]);
+        lastPruneMs = row?.value ? Number(JSON.parse(row.value)) : 0;
+      }
+      if (Number.isFinite(lastPruneMs) && lastPruneMs > 0 && nowMs - lastPruneMs < 12 * 3600 * 1000) return;
 
       const cutoff30d = nowMs - 30 * 24 * 3600 * 1000;
-      await this.db.run("DELETE FROM pool_snapshots WHERE captured_at_ms < ?", [cutoff30d]);
+      await this.db.run(
+        "DELETE FROM pool_snapshots WHERE pool_key IN ('gemini', '3p') AND window_key IN ('5h', 'weekly') AND captured_at_ms < ?",
+        [cutoff30d]
+      );
       await this.db.run(
         "DELETE FROM usage_reports WHERE settled_snapshot_id IS NOT NULL AND slice_start_ms < ?",
         [cutoff30d]
@@ -757,8 +793,10 @@ export class LedgerStore {
     const excludeSeparateArgon = poolKey === "gemini" && Boolean(settings?.has_separate_argon_pool);
     const byMember = new Map();
     const consumedIds = [];
+    const excludedArgonIds = [];
     for (const r of eligibleRows) {
       if (excludeSeparateArgon && isArgonModel(r.modelName)) {
+        excludedArgonIds.push(r.id);
         continue;
       }
       consumedIds.push(r.id);
@@ -784,6 +822,10 @@ export class LedgerStore {
     // 立即将本次已参与结算的 usage_reports 打标，彻底杜绝后续 90 秒心跳重复拉出旧记录多次计费
     if (consumedIds.length > 0) {
       await this.markUsageReportsSettled(consumedIds, snapshotId);
+    }
+    // Pro 独立 Argon 桶下被排除出普通 gemini 周池分摊的记录同步以负快照 ID 封账，防永久滞留未结算池
+    if (excludedArgonIds.length > 0 && snapshotId > 0) {
+      await this.markUsageReportsSettled(excludedArgonIds, -snapshotId);
     }
 
     const weekBucket = deriveWeekBucket(resetAt || "", capturedAtMs);
@@ -1147,8 +1189,9 @@ export class LedgerStore {
                     SET settled_snapshot_id = ?
                   WHERE pool_key = ?
                     AND settled_snapshot_id IS NULL
+                    AND slice_start_ms <= ?
                     AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) < ?`,
-                [-snapshotId, poolKey, resetBoundaryMs]
+                [-snapshotId, poolKey, alignSliceStartMs(resetBoundaryMs), resetBoundaryMs]
               );
             }
 
@@ -1220,9 +1263,9 @@ export class LedgerStore {
       }
     }
 
-    await this.maybePruneOldData(nowMs);
+    await this.maybePruneOldData(nowMs, settings);
 
-    const selfView = await this.getMemberSelfView(member.id, nowMs);
+    const selfView = await this.getMemberSelfView(member.id, nowMs, { settings });
     return {
       ok: true,
       acceptedEvents,
@@ -1264,12 +1307,14 @@ export class LedgerStore {
    */
   async computeRecent5hStats(nowMs) {
     const cutoff5h = nowMs - 5 * 3600 * 1000;
+    const minSliceMs = cutoff5h - SLICE_MS;
     const rows = await this.db.all(
       `SELECT member_id, pool_key, SUM(weighted_units) AS total_units, SUM(request_count) AS reqs
          FROM usage_reports
-        WHERE (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
-        GROUP BY member_id, pool_key`,
-      [cutoff5h]
+        WHERE slice_start_ms >= ?
+          AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
+        GROUP BY +member_id, +pool_key`,
+      [minSliceMs, cutoff5h]
     );
     const poolTotals = { gemini: 0, "3p": 0 };
     const perMember = new Map();
@@ -1294,7 +1339,7 @@ export class LedgerStore {
     return { shareMap, has5hGemini: poolTotals.gemini > 0, has5hThirdParty: poolTotals["3p"] > 0 };
   }
 
-  async getMemberSelfView(memberId, nowMs = this.nowFn()) {
+  async getMemberSelfView(memberId, nowMs = this.nowFn(), options = {}) {
     const member = await this.db.first(
       `SELECT id, name, role, balance_fen, low_balance_fen, status,
               COALESCE(accepted_rule_version, 1) AS accepted_rule_version,
@@ -1311,7 +1356,7 @@ export class LedgerStore {
       throw new Error("该成员账号已暂停或已停用，请联系组长");
     }
 
-    const settings = await this.getSettings();
+    const settings = options?.settings || (await this.getSettings());
     const pools = await this.getLatestPoolSnapshots();
     const weekBuckets = this.getActiveWeekBuckets(pools, nowMs);
 
@@ -1378,10 +1423,11 @@ export class LedgerStore {
       ? await this.db.all(
           `SELECT member_id, SUM(request_count) AS reqs
              FROM usage_reports
-            WHERE pool_key = '3p'
+            WHERE slice_start_ms >= ?
+              AND pool_key = '3p'
               AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
-            GROUP BY member_id`,
-          [p3CycleStartMs]
+            GROUP BY +member_id`,
+          [p3CycleStartMs - SLICE_MS, p3CycleStartMs]
         )
       : [];
     const p3ReqMap = new Map();
@@ -1437,7 +1483,7 @@ export class LedgerStore {
         `SELECT member_id, pool_key, SUM(attributed_pct) AS total_pct
            FROM slice_allocations
           WHERE (pool_key = 'gemini' AND week_bucket = ?) OR (pool_key = '3p' AND week_bucket = ?)
-          GROUP BY member_id, pool_key`,
+          GROUP BY +member_id, +pool_key`,
         [weekBuckets.gemini, weekBuckets["3p"]]
       );
       const pMap = new Map();
@@ -1547,7 +1593,7 @@ export class LedgerStore {
       `SELECT member_id, pool_key, SUM(attributed_pct) AS total_pct, SUM(charge_fen) AS total_charge_fen, SUM(weighted_units) AS total_units
          FROM slice_allocations
         WHERE (pool_key = 'gemini' AND week_bucket = ?) OR (pool_key = '3p' AND week_bucket = ?)
-        GROUP BY member_id, pool_key`,
+        GROUP BY +member_id, +pool_key`,
       [weekBuckets.gemini, weekBuckets["3p"]]
     );
 
@@ -1555,7 +1601,7 @@ export class LedgerStore {
       `SELECT member_id, pool_key, SUM(request_count) AS reqs, SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens) AS in_toks, SUM(output_tokens) AS out_toks
          FROM usage_reports
         WHERE slice_start_ms >= ?
-        GROUP BY member_id, pool_key`,
+        GROUP BY +member_id, +pool_key`,
       [nowMs - 7 * 24 * 3600 * 1000]
     );
 
@@ -1592,10 +1638,11 @@ export class LedgerStore {
       ? await this.db.all(
           `SELECT member_id, SUM(request_count) AS reqs
              FROM usage_reports
-            WHERE pool_key = '3p'
+            WHERE slice_start_ms >= ?
+              AND pool_key = '3p'
               AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
-            GROUP BY member_id`,
-          [p3CycleAdminStartMs]
+            GROUP BY +member_id`,
+          [p3CycleAdminStartMs - SLICE_MS, p3CycleAdminStartMs]
         )
       : [];
     const p3ReqAdminMap = new Map();

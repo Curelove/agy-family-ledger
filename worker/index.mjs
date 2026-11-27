@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS pool_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots (pool_key, window_key, captured_at_ms);
 CREATE TABLE IF NOT EXISTS slice_allocations (id TEXT PRIMARY KEY, pool_key TEXT NOT NULL, slice_start_ms INTEGER NOT NULL, week_bucket TEXT NOT NULL, member_id TEXT NOT NULL, pool_drop_pct REAL NOT NULL, member_share_ratio REAL NOT NULL, attributed_pct REAL NOT NULL, weighted_units REAL NOT NULL, unit_price_fen_per_pct INTEGER NOT NULL, charge_fen INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_week ON slice_allocations (member_id, week_bucket);
+CREATE INDEX IF NOT EXISTS idx_slice_alloc_pool_week ON slice_allocations (pool_key, week_bucket, member_id);
+CREATE INDEX IF NOT EXISTS idx_slice_alloc_member_created ON slice_allocations (member_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_slice_alloc_time ON slice_allocations (slice_start_ms);
 CREATE TABLE IF NOT EXISTS transactions (id TEXT PRIMARY KEY, member_id TEXT NOT NULL, kind TEXT NOT NULL, amount_fen INTEGER NOT NULL, balance_after_fen INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_transactions_member ON transactions (member_id, created_at);
@@ -24,6 +26,8 @@ CREATE TABLE IF NOT EXISTS rule_changes (id TEXT PRIMARY KEY, rule_version INTEG
 CREATE INDEX IF NOT EXISTS idx_rule_changes_version ON rule_changes (rule_version DESC);
 CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL, pool_key TEXT NOT NULL DEFAULT '', member_id TEXT NOT NULL DEFAULT '', missing_pct REAL NOT NULL DEFAULT 0, title TEXT NOT NULL, detail TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0, qq_notified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts (acknowledged, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts (kind, pool_key, member_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_qq ON alerts (qq_notified, created_at);
 `;
 
 let schemaBootstrapped = false;
