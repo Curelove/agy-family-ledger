@@ -832,6 +832,120 @@ try {
     assert.equal(afterUnbind.config.ignoredUpdateVersion, "1.5.0");
   });
 
+  // 17. 禁用 Claude 3P 池显式约定、即时违规标红、黑洞异常全组隐私公示与组员暂停态结构化识别
+  await test("alerts:restrict-3p-violation-blackhole-broadcast-and-paused-classification", async () => {
+    let t = Date.parse("2026-11-28T09:00:00Z");
+    const db5 = new DatabaseSync(":memory:");
+    const s5 = new LedgerStore(wrapNodeSqliteAdapter(db5), { nowFn: () => t });
+    await s5.ensureSchema(SCHEMA_SQL);
+    const d0 = await s5.getAdminDashboard();
+    const own5 = d0.members.find((m) => m.role === "owner");
+    const mem5 = await s5.createMember({ name: "组员戊", initialBalanceFen: 500, lowBalanceFen: 200 });
+
+    // 开启「普通成员仅限 Gemini 池」+ 保持黑洞全组公示开启 -> 规则版本号递增并编码到绑定码 r3p=1
+    await s5.updateSettings({
+      restrict_3p_for_members: true,
+      broadcast_blackhole_to_members: true,
+      blackhole_min_single_drop_pct: 0.5,
+      blackhole_warn_missing_pct: 5.0,
+      blackhole_critical_missing_pct: 15.0,
+    });
+    const d1 = await s5.getAdminDashboard();
+    assert.equal(d1.settings.rule_version, 2);
+    assert.equal(d1.settings.restrict_3p_for_members, true);
+
+    const codeR3p = buildInviteCode({
+      serverUrl: "https://agy-family-ledger.example.workers.dev",
+      memberToken: mem5.member_token,
+      ruleVersion: 2,
+      ledgerMode: "board_only",
+      restrict3pForMembers: true,
+    });
+    assert.ok(codeR3p.includes("&r3p=1"));
+    const parsedR3p = parseInviteCode(codeR3p);
+    assert.equal(parsedR3p.agreedRules.restrict3pForMembers, true);
+
+    // 组员确认规则后，哪怕只发了 1 次 Claude 3P 调用（尚未结算周水位下降），也应立即标红并写入组长异常记录
+    await s5.confirmMemberRules(mem5.member_token);
+    await s5.ingestHeartbeat(own5.memberToken, {
+      quotaSnapshots: [
+        { poolKey: "gemini", windowKey: "weekly", remainingPct: 90, resetAt: "2026-12-04T00:00:00Z", capturedAtMs: t },
+        { poolKey: "3p", windowKey: "weekly", remainingPct: 80, resetAt: "2026-12-04T00:00:00Z", capturedAtMs: t },
+      ],
+    });
+    t += 60_000;
+    await s5.ingestHeartbeat(mem5.member_token, {
+      usageEvents: [{ id: "bad3p:s1", modelName: "claude-opus-5-5-high", uncachedInputTokens: 6000, outputTokens: 1200, timestampMs: t - 1000 }],
+    });
+    // 组长自己使用 Claude 3P 不应被判定违规
+    await s5.ingestHeartbeat(own5.memberToken, {
+      usageEvents: [{ id: "own3p:s1", modelName: "claude-opus-5-5-high", uncachedInputTokens: 6000, outputTokens: 1200, timestampMs: t - 1000 }],
+    });
+
+    const mv5 = await s5.getMemberSelfView(mem5.id, t);
+    assert.equal(mv5.usageRules.poolRestriction.thirdPartyViolated, true, "普通成员使用 3P 必须立即触发违规警示");
+    assert.equal(mv5.peers.find((p) => p.name === "组员戊").poolViolated, true);
+    assert.equal(mv5.peers.find((p) => p.role === "owner").poolViolated, false, "组长本人不受普通成员禁用 3P 约束");
+    const dashAfter3p = await s5.getAdminDashboard(t);
+    assert.equal(dashAfter3p.members.find((m) => m.id === mem5.id).poolViolated, true);
+    assert.ok(dashAfter3p.alerts.some((a) => a.kind === "pool_violation" && a.member_id === mem5.id), "必须写入组长异常记录");
+    assert.equal(mv5.groupAlerts.length, 0, "私人的 pool_violation / low_balance 告警严禁泄露进全组 groupAlerts");
+
+    // 触发未统计黑洞异常 -> 开启公示时成员端 groupAlerts 可见，组长标已读后自动撤下
+    for (let i = 0; i < 3; i++) {
+      t += 90_000;
+      await s5.ingestHeartbeat(own5.memberToken, {
+        quotaSnapshots: [{ poolKey: "gemini", windowKey: "weekly", remainingPct: 90 - (i + 1) * 3, resetAt: "2026-12-04T00:00:00Z", capturedAtMs: t }],
+      });
+    }
+    const mvWithBh = await s5.getMemberSelfView(mem5.id, t);
+    assert.equal(mvWithBh.groupAlerts.length, 1, "开启黑洞公示时成员端必须收到未统计消耗全组提醒");
+    assert.ok(mvWithBh.groupAlerts[0].kind === "blackhole_warn" || mvWithBh.groupAlerts[0].kind === "blackhole_critical");
+
+    // 关闭黑洞公示 -> groupAlerts 清空
+    await s5.updateSettings({ broadcast_blackhole_to_members: false });
+    assert.equal((await s5.getMemberSelfView(mem5.id, t)).groupAlerts.length, 0, "关闭黑洞公示后成员端不再展示");
+
+    // 重新开启并由组长标记已读 -> groupAlerts 自动撤下
+    await s5.updateSettings({ broadcast_blackhole_to_members: true });
+    await s5.acknowledgeAlert(mvWithBh.groupAlerts[0].id);
+    assert.equal((await s5.getMemberSelfView(mem5.id, t)).groupAlerts.length, 0, "组长标记已读后全组公示应自动撤下");
+
+    // 暂停该成员并通过真实 HTTP 回环验证 collector 归类为 accountBlocked.kind === 'paused' 且不套用网络报错前缀
+    await s5.updateMember(mem5.id, { status: "paused" });
+    const srv = http.createServer(async (req, res) => {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      try {
+        const out = await s5.ingestHeartbeat(req.headers["x-member-token"] || "", body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(out));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const port = srv.address().port;
+    try {
+      const colDir = fs.mkdtempSync(path.join(tmpDir, "col-paused-"));
+      const col = new MemberLedgerCollector({
+        configPath: path.join(colDir, "config.json"),
+        defaultConfigPath: path.join(colDir, "config.default.json"),
+        statePath: path.join(colDir, "state.json"),
+        transcriptRoots: [],
+      });
+      col.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, memberToken: mem5.member_token });
+      const syncRes = await col.syncOnce();
+      assert.equal(syncRes.ok, false);
+      assert.equal(syncRes.state.accountBlocked?.kind, "paused", "暂停状态应结构化归类为 accountBlocked.paused");
+      assert.equal(syncRes.state.lastError, "", "暂停状态不得再套用「同步暂未送达」普通断网报错");
+    } finally {
+      srv.close();
+    }
+  });
+
   console.log(`\nALL E2E TESTS PASSED (${passed}/${passed})`);
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });

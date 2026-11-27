@@ -29,12 +29,14 @@ export const DEFAULT_SETTINGS = {
   pool_reserve_floor_pct: 0, // 总池保留底线（周剩余 %，例如 20 表示剩余降至 20% 时提醒暂停重任务）
   member_weekly_cap_pct: 0, // 单人本周期参考上限（%，例如双人组 50、三人组 30）
   apply_cap_to_owner: true, // 单人上限是否对组长本人同样生效（默认开启，成员侧边栏如实公示适用范围）
+  restrict_3p_for_members: false, // 是否禁止普通成员使用 Claude 3P 池（开启后产生 3P 消耗即触发红框强警示与组长异常记录）
   usage_rule_note: "", // 可选补充文字约定（最多 180 字）
   // 未统计掉量滚动滤波阈值（0.5% 以上进入累计窗口，累计达到提醒线才告警）
   blackhole_min_single_drop_pct: 0.5,
   blackhole_window_minutes: 15,
   blackhole_warn_missing_pct: 5.0,
   blackhole_critical_missing_pct: 15.0,
+  broadcast_blackhole_to_members: true, // 检测到未统计掉量异常时同步在全体组员侧边栏顶部公示提醒（组长标为已读后撤下）
   offline_grace_minutes: 12,
   calibration_dry_run: true, // 与 ledger_mode 保持同步，兼容旧数据
   quota_snapshot_authority: "owner_only", // 'owner_only' | 'all_members'
@@ -166,6 +168,7 @@ export function formatUsageConventionSummary(settings = DEFAULT_SETTINGS) {
   const floor = normalizePctLimit(s.pool_reserve_floor_pct, 95);
   const cap = normalizePctLimit(s.member_weekly_cap_pct, 100);
   const applyOwner = s.apply_cap_to_owner !== false;
+  const restrict3p = Boolean(s.restrict_3p_for_members);
   const note = sanitizeUsageRuleNote(s.usage_rule_note);
 
   const parts = [];
@@ -174,6 +177,9 @@ export function formatUsageConventionSummary(settings = DEFAULT_SETTINGS) {
   }
   if (cap > 0) {
     parts.push(`单人每周期上限 ${fmtPctLabel(cap)}（${applyOwner ? "全员同等适用" : "适用于普通成员"}）`);
+  }
+  if (restrict3p) {
+    parts.push("普通成员仅限 Gemini 池（禁用 Claude 3P）");
   }
   if (note) {
     parts.push(`补充说明：${note.length > 40 ? note.slice(0, 40) + "…" : note}`);
@@ -189,14 +195,17 @@ export function evaluateUsageRulesStatus({
   pools = {},
   weekSummary = {},
   role = "member",
+  recent3pRequests = 0,
 } = {}) {
   const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const poolReserveFloorPct = normalizePctLimit(s.pool_reserve_floor_pct, 95);
   const memberWeeklyCapPct = normalizePctLimit(s.member_weekly_cap_pct, 100);
   const applyCapToOwner = s.apply_cap_to_owner !== false;
+  const restrict3pForMembers = Boolean(s.restrict_3p_for_members);
   const usageRuleNote = sanitizeUsageRuleNote(s.usage_rule_note);
   const usageRuleNoteHash = computeRuleNoteHash(usageRuleNote);
-  const hasUsageRules = poolReserveFloorPct > 0 || memberWeeklyCapPct > 0 || Boolean(usageRuleNote);
+  const hasUsageRules =
+    poolReserveFloorPct > 0 || memberWeeklyCapPct > 0 || restrict3pForMembers || Boolean(usageRuleNote);
 
   const gemRemRaw = pools?.gemini?.weekly?.remainingPct;
   const p3RemRaw = pools?.["3p"]?.weekly?.remainingPct;
@@ -218,10 +227,15 @@ export function evaluateUsageRulesStatus({
   const geminiApproaching = capApplies && !geminiReached && gUsed >= nearThreshold;
   const thirdPartyApproaching = capApplies && !thirdPartyReached && pUsed >= nearThreshold;
 
+  const p3ReqCount = Math.max(0, Math.round(Number(recent3pRequests) || 0));
+  const restrictionApplies = restrict3pForMembers && role !== "owner";
+  const thirdPartyViolated = restrictionApplies && (pUsed > 0 || p3ReqCount > 0);
+
   return {
     poolReserveFloorPct,
     memberWeeklyCapPct,
     applyCapToOwner,
+    restrict3pForMembers,
     usageRuleNote,
     usageRuleNoteHash,
     hasUsageRules,
@@ -244,6 +258,13 @@ export function evaluateUsageRulesStatus({
       thirdPartyApproaching,
       anyReached: geminiReached || thirdPartyReached,
       anyApproaching: geminiApproaching || thirdPartyApproaching,
+    },
+    poolRestriction: {
+      restrict3pForMembers,
+      applies: restrictionApplies,
+      thirdPartyViolated,
+      thirdPartyPct: pUsed,
+      recent3pRequests: p3ReqCount,
     },
   };
 }

@@ -93,7 +93,7 @@ export default {
       return jsonResp({
         ok: true,
         service: "agy-family-ledger-worker",
-        version: "1.4.0",
+        version: "1.5.0",
         hasDb: Boolean(env?.DB),
         hasAdminSecret: Boolean(env?.ADMIN_SECRET),
       });

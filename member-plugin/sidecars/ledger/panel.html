@@ -68,8 +68,78 @@
     font-size: 12px; display: none; align-items: flex-start; gap: 8px;
   }
   .banner.show { display: flex; }
-  .banner.warn { background: var(--amber-soft); color: #7C4B1F; border: 1px solid #E8CFAF; }
   .banner.err { background: var(--vermilion-soft); color: #8F3022; border: 1px solid #EBC0B8; }
+
+  .alert-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .alert-callout {
+    border-radius: 11px;
+    padding: 11px 12px;
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .alert-callout.critical {
+    background: #FDF0ED;
+    border-color: #E8B1A6;
+    border-left-color: #BF3826;
+    color: #5E1D16;
+  }
+  .alert-callout.warning {
+    background: #FCF2E3;
+    border-color: #E6C394;
+    border-left-color: #C26E1E;
+    color: #5B3816;
+  }
+  .alert-callout-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .alert-callout-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+  .alert-callout-ico {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .alert-callout.critical .alert-callout-ico { color: #BF3826; }
+  .alert-callout.warning .alert-callout-ico { color: #B86518; }
+  .alert-callout-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  .alert-callout.critical .alert-callout-title { color: #7C1B10; }
+  .alert-callout.warning .alert-callout-title { color: #6B3909; }
+  .alert-callout-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 99px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .alert-callout.critical .alert-callout-badge { background: #BF3826; color: #FFFDF9; }
+  .alert-callout.warning .alert-callout-badge { background: #B86518; color: #FFFDF9; }
+  .alert-callout-body {
+    font-size: 12.5px;
+    line-height: 1.55;
+    padding-left: 24px;
+  }
 
   .rule-alert-card {
     background: var(--amber-soft);
@@ -140,22 +210,35 @@
     font-size: 12px; font-weight: 600; background: var(--pine-soft); color: var(--pine);
   }
   .scope-pill.member-only { background: var(--amber-soft); color: #7C4B1F; }
+  .scope-pill.danger { background: var(--vermilion-soft); color: #8F3022; }
   .rule-footnote { font-size: 12px; color: var(--muted); margin-top: 7px; }
-  .stat-cell .s.warn { color: var(--amber); font-weight: 600; }
-  .peer-tag.warn { background: var(--amber-soft); color: #7C4B1F; }
-
-  .week-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
   .stat-cell {
     background: var(--paper); border-radius: 9px; padding: 9px 10px; min-width: 0;
+    border: 1px solid transparent;
   }
+  .stat-cell.warn { background: #FCF2E3; border-color: #E6C394; }
+  .stat-cell.danger { background: #FDF0ED; border-color: #E8B1A6; }
   .stat-cell .k { font-size: 12px; color: var(--muted); }
   .stat-cell .v { font-size: 17px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .stat-cell .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .stat-cell .s.warn { color: #9E5612; font-weight: 700; }
+  .stat-cell .s.danger { color: #B43020; font-weight: 700; }
+  .peer-tag.warn { background: var(--amber-soft); color: #7C4B1F; font-weight: 700; }
+  .peer-tag.danger { background: #BF3826; color: #FFFDF9; font-weight: 700; }
+
+  .week-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
 
   .balance-strip {
     margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border);
     display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap;
     font-size: 12px;
+  }
+  .balance-strip.depleted {
+    background: #FDF0ED;
+    border: 1px solid #E8B1A6;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-top: 10px;
   }
   .balance-val { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .balance-val.low { color: var(--amber); }
@@ -379,12 +462,9 @@
     </div>
   </section>
 
-  <div class="banner warn" id="banner-convention">
-    <span id="banner-convention-text"></span>
-  </div>
-  <div class="banner warn" id="banner-low">
-    <span id="banner-low-text"></span>
-  </div>
+  <!-- 分级强警示卡片区（账号暂停/停用、误用 3P、余额用完/偏低、超上限、底线与全组异常公示） -->
+  <div class="alert-stack" id="alert-stack" hidden></div>
+
   <div class="banner err" id="banner-err">
     <span id="banner-err-text"></span>
   </div>
@@ -457,12 +537,12 @@
       <span style="font-size:12px;color:var(--muted);">待传记录 <strong id="queue-count">0</strong></span>
     </div>
     <div class="week-grid">
-      <div class="stat-cell">
+      <div class="stat-cell" id="my-gem-cell">
         <div class="k">Gemini 本周期</div>
         <div class="v" id="my-gem-pct">0.00%</div>
         <div class="s" id="my-gem-cost" hidden></div>
       </div>
-      <div class="stat-cell">
+      <div class="stat-cell" id="my-3p-cell">
         <div class="k">Claude 3P 本周期</div>
         <div class="v" id="my-3p-pct">0.00%</div>
         <div class="s" id="my-3p-cost" hidden></div>
@@ -702,6 +782,44 @@ function fmtShortTime(iso) {
   return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+const ALERT_ICONS = {
+  octagon:
+    '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+  triangle:
+    '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  shield:
+    '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+  wifiOff:
+    '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>',
+};
+
+function renderAlertStack(cards) {
+  const stack = $("alert-stack");
+  if (!Array.isArray(cards) || cards.length === 0) {
+    stack.hidden = true;
+    stack.innerHTML = "";
+    return;
+  }
+  const rank = (lvl) => (lvl === "critical" ? 0 : 1);
+  const sorted = [...cards].sort((a, b) => rank(a.level) - rank(b.level));
+  stack.hidden = false;
+  stack.innerHTML = sorted
+    .map(
+      (c) =>
+        '<article class="alert-callout ' + (c.level === "critical" ? "critical" : "warning") + '" role="alert">' +
+        '<div class="alert-callout-head">' +
+        '<div class="alert-callout-left">' +
+        '<span class="alert-callout-ico">' + (ALERT_ICONS[c.icon] || ALERT_ICONS.triangle) + "</span>" +
+        '<span class="alert-callout-title">' + esc(c.title) + "</span>" +
+        "</div>" +
+        (c.badge ? '<span class="alert-callout-badge">' + esc(c.badge) + "</span>" : "") +
+        "</div>" +
+        '<div class="alert-callout-body">' + esc(c.body) + "</div>" +
+        "</article>"
+    )
+    .join("");
+}
+
 function render(state) {
   latestStateCache = state;
   renderUpdateUi(state);
@@ -709,6 +827,8 @@ function render(state) {
   const mv = state.memberView;
   const dot = $("sync-dot");
   const syncText = $("sync-text");
+  const blocked = state.accountBlocked || null;
+  const alertCards = [];
 
   $("onboard-card").hidden = Boolean(state.configured);
   $("cfg-details").hidden = !state.configured;
@@ -719,6 +839,14 @@ function render(state) {
   if (!state.configured) {
     dot.className = "dot warn";
     syncText.textContent = "等待粘贴绑定码";
+  } else if (blocked) {
+    dot.className = "dot err";
+    syncText.textContent =
+      blocked.kind === "paused"
+        ? "账号同步已被组长暂停"
+        : blocked.kind === "archived"
+        ? "成员绑定码已停用"
+        : "成员绑定码已失效";
   } else if (state.lastError) {
     dot.className = "dot err";
     syncText.textContent = "同步暂未连通，记录已暂存本地";
@@ -731,8 +859,26 @@ function render(state) {
   $("queue-count").textContent = String(state.pendingQueueCount || 0);
   $("cfg-status").textContent = state.configured ? "已连接 (" + state.config.tokenPreview + ")" : "未连接";
 
-  $("banner-err").classList.toggle("show", Boolean(state.lastError && state.configured));
-  $("banner-err-text").textContent = state.lastError || "";
+  $("banner-err").classList.remove("show");
+  $("banner-err-text").textContent = "";
+
+  if (state.configured && blocked) {
+    alertCards.push({
+      level: "critical",
+      icon: "octagon",
+      title: blocked.title || "账号同步已被组长暂停",
+      badge: blocked.kind === "paused" ? "已暂停" : blocked.kind === "archived" ? "已停用" : "已失效",
+      body: blocked.detail || "请联系组长确认你的成员状态。",
+    });
+  } else if (state.configured && state.lastError) {
+    alertCards.push({
+      level: "warning",
+      icon: "wifiOff",
+      title: "同步暂未连通（记录已暂存本地）",
+      badge: "等待重连",
+      body: state.lastError,
+    });
+  }
 
   const rm = state.ruleMismatch;
   $("rule-change-card").hidden = !Boolean(state.configured && rm && rm.mismatch);
@@ -748,12 +894,17 @@ function render(state) {
     $("rule-diff-new").textContent = rm.currentSummary || "云端新规则";
   }
 
-  if (!mv) return;
+  if (!mv) {
+    renderAlertStack(alertCards);
+    return;
+  }
 
   const isPrepaid = mv.pricing?.ledgerMode === "prepaid";
   const ur = mv.usageRules || {};
   const floorPct = Number(ur.poolReserveFloorPct || 0);
   const capPct = Number(ur.memberWeeklyCapPct || 0);
+  const restrict3p = Boolean(ur.restrict3pForMembers);
+  const p3Violated = Boolean(ur.poolRestriction?.thirdPartyViolated);
   const fmtLimit = (v) => (Number.isInteger(v) ? v + "%" : v.toFixed(1) + "%");
 
   $("family-title").textContent = mv.pricing?.familyName || "家庭组额度看板";
@@ -775,50 +926,149 @@ function render(state) {
   }
   if (capApplies) {
     gemSubParts.push(ur.memberCap?.geminiReached ? "已达上限 " + fmtLimit(capPct) : "上限参考 " + fmtLimit(capPct));
-    p3SubParts.push(ur.memberCap?.thirdPartyReached ? "已达上限 " + fmtLimit(capPct) : "上限参考 " + fmtLimit(capPct));
+    if (!p3Violated) {
+      p3SubParts.push(ur.memberCap?.thirdPartyReached ? "已达上限 " + fmtLimit(capPct) : "上限参考 " + fmtLimit(capPct));
+    }
+  }
+  if (p3Violated) {
+    p3SubParts.push("违反禁用 3P");
   }
   $("my-gem-cost").hidden = gemSubParts.length === 0;
   $("my-3p-cost").hidden = p3SubParts.length === 0;
   $("my-gem-cost").textContent = gemSubParts.join(" · ");
   $("my-3p-cost").textContent = p3SubParts.join(" · ");
   $("my-gem-cost").className = "s" + (ur.memberCap?.geminiReached ? " warn" : "");
-  $("my-3p-cost").className = "s" + (ur.memberCap?.thirdPartyReached ? " warn" : "");
+  $("my-3p-cost").className = "s" + (p3Violated ? " danger" : ur.memberCap?.thirdPartyReached ? " warn" : "");
+  $("my-gem-cell").className = "stat-cell" + (ur.memberCap?.geminiReached ? " warn" : "");
+  $("my-3p-cell").className = "stat-cell" + (p3Violated ? " danger" : ur.memberCap?.thirdPartyReached ? " warn" : "");
 
   $("prepaid-strip").hidden = !isPrepaid || mv.role === "owner";
   $("tx-details").hidden = !isPrepaid || mv.role === "owner";
 
-  // 温和的使用约定实时提醒（总池触及保留底线 / 个人接近或达到参考上限）
-  const convNotices = [];
-  if (ur.poolFloor?.geminiReached) {
-    convNotices.push(
-      "Gemini 4 周剩余 " + pctText(ur.poolFloor.geminiRemainingPct) + "，已触及全组约定的 " + fmtLimit(floorPct) + " 保留底线，建议暂缓重任务。"
-    );
+  // 1) 约定外使用 Claude 3P 池（红色强警示）
+  if (p3Violated) {
+    const p3PctVal = Number(ur.poolRestriction?.thirdPartyPct || mv.weekSummary?.thirdPartyPct || 0);
+    const p3Reqs = Number(ur.poolRestriction?.recent3pRequests || 0);
+    const statDesc = p3PctVal > 0
+      ? "本周期已产生 Claude 3P 消耗 " + p3PctVal.toFixed(2) + "%" + (p3Reqs > 0 ? "（" + p3Reqs + " 次调用）" : "")
+      : "本周期检测到 " + p3Reqs + " 次 Claude 3P 调用";
+    alertCards.push({
+      level: "critical",
+      icon: "shield",
+      title: "检测到约定外 Claude 3P 池消耗",
+      badge: "误用 3P",
+      body: statDesc + "。当前全组约定普通成员仅限使用 Gemini 池，请立即在对话中切回 Gemini 模型。",
+    });
   }
-  if (ur.poolFloor?.thirdPartyReached) {
-    convNotices.push(
-      "Claude 3P 周剩余 " + pctText(ur.poolFloor.thirdPartyRemainingPct) + "，已触及全组约定的 " + fmtLimit(floorPct) + " 保留底线，建议暂缓重任务。"
-    );
+
+  // 2) 余额用完/欠费（红色强警示）或余额偏低（琥珀提醒）
+  if (isPrepaid && mv.role !== "owner") {
+    const balEl = $("balance-display");
+    balEl.textContent = yuan(mv.balanceFen);
+    balEl.className = "balance-val" + (mv.isDepleted ? " depleted" : mv.isLowBalance ? " low" : "");
+    $("prepaid-strip").className = "balance-strip" + (mv.isDepleted ? " depleted" : "");
+    $("unit-price-hint").textContent =
+      mv.pricing?.pricingMode === "weighted_units"
+        ? mv.pricing?.summaryText || ""
+        : "Gemini " + yuan(mv.pricing?.geminiFenPerWeeklyPct) + "/1% · 3P " + yuan(mv.pricing?.thirdPartyFenPerWeeklyPct) + "/1%";
+
+    if (mv.isDepleted) {
+      alertCards.push({
+        level: "critical",
+        icon: "octagon",
+        title: Number(mv.balanceFen) < 0 ? "可用余额已欠费" : "可用余额已用完",
+        badge: yuan(mv.balanceFen),
+        body: "当前可用余额为 " + yuan(mv.balanceFen) + "，请先暂停运行较重任务并联系组长补充余额。",
+      });
+    } else if (mv.isLowBalance) {
+      alertCards.push({
+        level: "warning",
+        icon: "triangle",
+        title: "可用余额偏低",
+        badge: "剩余 " + yuan(mv.balanceFen),
+        body: "当前可用余额已低于提醒线（" + yuan(mv.lowBalanceFen) + "），如需继续使用建议提前联系组长补充。",
+      });
+    }
+  } else {
+    $("prepaid-strip").className = "balance-strip";
   }
-  if (ur.memberCap?.geminiReached) {
-    convNotices.push(
-      "你本周期 Gemini 已用 " + Number(ur.memberCap.geminiPct || 0).toFixed(1) + "%，已达约定的单人参考上限（" + fmtLimit(capPct) + "）。"
-    );
-  } else if (ur.memberCap?.geminiApproaching) {
-    convNotices.push(
-      "你本周期 Gemini 已用 " + Number(ur.memberCap.geminiPct || 0).toFixed(1) + "%，已接近约定的单人参考上限（" + fmtLimit(capPct) + "）。"
-    );
+
+  // 3) 个人单周期上限（已超/达到 -> 红色强警示；接近 85% -> 琥珀提醒）
+  if (ur.memberCap?.geminiReached || ur.memberCap?.thirdPartyReached) {
+    const reachedParts = [];
+    let topVal = 0;
+    if (ur.memberCap?.geminiReached) {
+      const v = Number(ur.memberCap.geminiPct || 0);
+      topVal = Math.max(topVal, v);
+      reachedParts.push("Gemini 已用 " + v.toFixed(1) + "%");
+    }
+    if (ur.memberCap?.thirdPartyReached) {
+      const v = Number(ur.memberCap.thirdPartyPct || 0);
+      topVal = Math.max(topVal, v);
+      reachedParts.push("Claude 3P 已用 " + v.toFixed(1) + "%");
+    }
+    alertCards.push({
+      level: "critical",
+      icon: "triangle",
+      title: topVal > capPct ? "已超出本周期个人用量上限" : "已达到本周期个人用量上限",
+      badge: topVal.toFixed(1) + "% / " + fmtLimit(capPct),
+      body: "你本周期 " + reachedParts.join("，") + "，已达到全组约定的单人参考上限（" + fmtLimit(capPct) + "），建议先暂停非紧急任务等待下周期重置。",
+    });
+  } else if (ur.memberCap?.geminiApproaching || ur.memberCap?.thirdPartyApproaching) {
+    const nearParts = [];
+    let topVal = 0;
+    if (ur.memberCap?.geminiApproaching) {
+      const v = Number(ur.memberCap.geminiPct || 0);
+      topVal = Math.max(topVal, v);
+      nearParts.push("Gemini 已用 " + v.toFixed(1) + "%");
+    }
+    if (ur.memberCap?.thirdPartyApproaching) {
+      const v = Number(ur.memberCap.thirdPartyPct || 0);
+      topVal = Math.max(topVal, v);
+      nearParts.push("Claude 3P 已用 " + v.toFixed(1) + "%");
+    }
+    alertCards.push({
+      level: "warning",
+      icon: "triangle",
+      title: "即将达到本周期个人上限",
+      badge: topVal.toFixed(1) + "% / " + fmtLimit(capPct),
+      body: "你本周期 " + nearParts.join("，") + "，已接近单人参考上限（" + fmtLimit(capPct) + "），请注意控制任务体量。",
+    });
   }
-  if (ur.memberCap?.thirdPartyReached) {
-    convNotices.push(
-      "你本周期 Claude 3P 已用 " + Number(ur.memberCap.thirdPartyPct || 0).toFixed(1) + "%，已达约定的单人参考上限（" + fmtLimit(capPct) + "）。"
-    );
-  } else if (ur.memberCap?.thirdPartyApproaching) {
-    convNotices.push(
-      "你本周期 Claude 3P 已用 " + Number(ur.memberCap.thirdPartyPct || 0).toFixed(1) + "%，已接近约定的单人参考上限（" + fmtLimit(capPct) + "）。"
-    );
+
+  // 4) 全组总池触及保留底线（琥珀强提醒）
+  if (ur.poolFloor?.geminiReached || ur.poolFloor?.thirdPartyReached) {
+    const floorParts = [];
+    if (ur.poolFloor?.geminiReached) {
+      floorParts.push("Gemini 4 周剩余 " + pctText(ur.poolFloor.geminiRemainingPct));
+    }
+    if (ur.poolFloor?.thirdPartyReached) {
+      floorParts.push("Claude 3P 周剩余 " + pctText(ur.poolFloor.thirdPartyRemainingPct));
+    }
+    alertCards.push({
+      level: "warning",
+      icon: "triangle",
+      title: "全组共享池已触及保留底线",
+      badge: "底线 " + fmtLimit(floorPct),
+      body: floorParts.join("，") + "，已降至全组约定的 " + fmtLimit(floorPct) + " 保留底线以下，请暂缓非紧急重任务。",
+    });
   }
-  $("banner-convention").classList.toggle("show", convNotices.length > 0);
-  $("banner-convention-text").textContent = convNotices.join(" ");
+
+  // 5) 全组未统计消耗（黑洞）异常公示（仅在组长开启公示且未标已读时展示）
+  const groupAlerts = Array.isArray(mv.groupAlerts) ? mv.groupAlerts : [];
+  for (const ga of groupAlerts.slice(0, 2)) {
+    const isCrit = ga.severity === "critical" || ga.kind === "blackhole_critical";
+    const cleanTitle = String(ga.title || "全组检测到未统计额度异常消耗").replace(/[（(]约\s*[0-9.]+%[）)]$/, "").trim();
+    alertCards.push({
+      level: isCrit ? "critical" : "warning",
+      icon: "shield",
+      title: cleanTitle || "全组检测到未统计额度异常消耗",
+      badge: ga.missingPct > 0 ? "异常 -" + Number(ga.missingPct).toFixed(1) + "%" : "全组异常",
+      body: (ga.detail || "近期官方剩余额度下降未匹配到本地插件上报。") + " 请全员自查本机插件是否正常开启，切勿在未装插件设备或第三方服务中使用账号。",
+    });
+  }
+
+  renderAlertStack(alertCards);
 
   // 全组使用约定卡片（仅当组长配置了至少一项约定时显示）
   $("usage-rules-card").hidden = !Boolean(ur.hasUsageRules);
@@ -839,30 +1089,15 @@ function render(state) {
         '<div class="rule-item"><strong>单人周期参考上限：</strong><strong>' + fmtLimit(capPct) + '</strong><span class="' + scopeCls + '">' + scopeTxt + "</span></div>"
       );
     }
+    if (restrict3p) {
+      ruleItems.push(
+        '<div class="rule-item"><strong>模型池限制：</strong>仅限使用 <strong>Gemini 池</strong><span class="scope-pill danger">普通成员禁用 3P</span></div>'
+      );
+    }
     if (ur.usageRuleNote) {
       ruleItems.push('<div class="rule-item"><strong>补充说明：</strong>' + esc(ur.usageRuleNote) + "</div>");
     }
     $("usage-rules-list").innerHTML = ruleItems.join("");
-  }
-
-  if (isPrepaid) {
-    if (mv.role !== "owner") {
-      const balEl = $("balance-display");
-      balEl.textContent = yuan(mv.balanceFen);
-      balEl.className = "balance-val" + (mv.isDepleted ? " depleted" : mv.isLowBalance ? " low" : "");
-      $("unit-price-hint").textContent =
-        mv.pricing?.pricingMode === "weighted_units"
-          ? mv.pricing?.summaryText || ""
-          : "Gemini " + yuan(mv.pricing?.geminiFenPerWeeklyPct) + "/1% · 3P " + yuan(mv.pricing?.thirdPartyFenPerWeeklyPct) + "/1%";
-      $("banner-low").classList.toggle("show", Boolean(mv.isLowBalance || mv.isDepleted));
-      $("banner-low-text").textContent = mv.isDepleted
-        ? "当前可用余额已用完（" + yuan(mv.balanceFen) + "），如需继续运行较重任务请联系组长补充。"
-        : "当前可用余额偏低（" + yuan(mv.balanceFen) + "），可按需联系组长补充。";
-    } else {
-      $("banner-low").classList.remove("show");
-    }
-  } else {
-    $("banner-low").classList.remove("show");
   }
 
   const gemW = mv.pools?.gemini?.weekly;
@@ -901,6 +1136,7 @@ function render(state) {
         const displayName = String(p.name || "").replace(/[（(]我自己[）)]$/, "").trim() || (p.role === "owner" ? "组长" : "成员");
         const tag = p.isSelf ? "我" : (p.role === "owner" && displayName !== "组长" ? "组长" : "");
         const capBadge = p.capReached ? '<span class="peer-tag warn">达上限</span>' : "";
+        const poolBadge = p.poolViolated ? '<span class="peer-tag danger">误用 3P</span>' : "";
         const h5Parts = [];
         if (Number(p.recent5hGeminiShare || 0) > 0) h5Parts.push("Gemini " + Number(p.recent5hGeminiShare).toFixed(0) + "%");
         if (Number(p.recent5hThirdPartyShare || 0) > 0) h5Parts.push("3P " + Number(p.recent5hThirdPartyShare).toFixed(0) + "%");
@@ -908,7 +1144,7 @@ function render(state) {
         return (
           '<div class="peer-row">' +
           '<div class="peer-name"><span class="' + dotCls + '"></span><span>' + esc(displayName) + "</span>" +
-          (tag ? '<span class="peer-tag">' + tag + "</span>" : "") + capBadge +
+          (tag ? '<span class="peer-tag">' + tag + "</span>" : "") + poolBadge + capBadge +
           "</div>" +
           '<div class="peer-right"><div class="peer-nums">Gemini ' + Number(p.geminiPct || 0).toFixed(1) + "% · 3P " + Number(p.thirdPartyPct || 0).toFixed(1) + "%</div>" + h5Line + "</div>" +
           "</div>"

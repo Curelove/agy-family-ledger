@@ -1,7 +1,7 @@
 {
   "name": "agy-family-ledger",
   "displayName": "家庭组额度看板",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "家庭组共享额度侧边栏：只统计本地纯数字 Token 与剩余配额百分比，查看全组剩余额度、使用约定底线与上限提醒、近 5 小时活跃度与本周期成员用量，并内置 GitHub Releases 更新检查。",
   "logo": "assets/logo.svg",
   "homepage": "https://github.com/Curelove/agy-family-ledger",

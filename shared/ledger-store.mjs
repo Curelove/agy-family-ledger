@@ -33,6 +33,7 @@ const RULE_PRICING_KEYS = [
   "pool_reserve_floor_pct",
   "member_weekly_cap_pct",
   "apply_cap_to_owner",
+  "restrict_3p_for_members",
   "usage_rule_note",
 ];
 
@@ -207,6 +208,8 @@ export class LedgerStore {
     out.pool_reserve_floor_pct = normalizePctLimit(out.pool_reserve_floor_pct, 95);
     out.member_weekly_cap_pct = normalizePctLimit(out.member_weekly_cap_pct, 100);
     out.apply_cap_to_owner = out.apply_cap_to_owner !== false;
+    out.restrict_3p_for_members = Boolean(out.restrict_3p_for_members);
+    out.broadcast_blackhole_to_members = out.broadcast_blackhole_to_members !== false;
     out.usage_rule_note = sanitizeUsageRuleNote(out.usage_rule_note);
     return out;
   }
@@ -231,6 +234,12 @@ export class LedgerStore {
     }
     if ("apply_cap_to_owner" in normalized) {
       normalized.apply_cap_to_owner = Boolean(normalized.apply_cap_to_owner);
+    }
+    if ("restrict_3p_for_members" in normalized) {
+      normalized.restrict_3p_for_members = Boolean(normalized.restrict_3p_for_members);
+    }
+    if ("broadcast_blackhole_to_members" in normalized) {
+      normalized.broadcast_blackhole_to_members = Boolean(normalized.broadcast_blackhole_to_members);
     }
     if ("usage_rule_note" in normalized) {
       normalized.usage_rule_note = sanitizeUsageRuleNote(normalized.usage_rule_note);
@@ -747,6 +756,7 @@ export class LedgerStore {
 
     const settings = await this.getSettings();
     let acceptedEvents = 0;
+    let accepted3pRequests = 0;
     const MAX_SINGLE_EVENT_TOKENS = 20_000_000;
 
     // 1. 写入幂等增量 Token 上报（采用批量提交，避免 Cloudflare D1 逐条串行写入导致大批次补传超时）
@@ -781,6 +791,8 @@ export class LedgerStore {
       const fullId = `${member.id}:${evId}`;
       pendingStmts.push({
         sql: insertSql,
+        poolKey,
+        reqCount,
         params: [fullId, member.id, sliceStartMs, Math.round(tsMs), poolKey, modelName, reqCount, uncached, cacheRead, cacheWrite, output, weighted, nowIso],
       });
     }
@@ -790,13 +802,19 @@ export class LedgerStore {
       const chunk = pendingStmts.slice(i, i + BATCH_CHUNK);
       if (typeof this.db.batch === "function") {
         const results = await this.db.batch(chunk);
-        for (const res of results || []) {
-          if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) acceptedEvents++;
-        }
+        (results || []).forEach((res, idx) => {
+          if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) {
+            acceptedEvents++;
+            if (chunk[idx]?.poolKey === "3p") accepted3pRequests += chunk[idx].reqCount || 1;
+          }
+        });
       } else {
         for (const s of chunk) {
           const res = await this.db.run(s.sql, s.params);
-          if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) acceptedEvents++;
+          if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) {
+            acceptedEvents++;
+            if (s.poolKey === "3p") accepted3pRequests += s.reqCount || 1;
+          }
         }
       }
     }
@@ -807,6 +825,20 @@ export class LedgerStore {
     const snapshots = Array.isArray(payload.quotaSnapshots) ? payload.quotaSnapshots : [];
     let ignoredQuotaSnapshots = 0;
     const newAlerts = [];
+
+    if (settings.restrict_3p_for_members && member.role !== "owner" && accepted3pRequests > 0) {
+      const pvAlert = await this.insertAlertDedup({
+        kind: "pool_violation",
+        severity: "warning",
+        poolKey: "3p",
+        memberId: member.id,
+        missingPct: 0,
+        title: `成员「${member.name}」使用了约定外的 Claude 3P 池`,
+        detail: `本轮检测到 ${accepted3pRequests} 次 Claude 3P 调用。当前全组已启用「普通成员仅限 Gemini 池」约定，对方侧边栏已弹出红色警示提醒。`,
+        nowMs,
+      });
+      if (pvAlert) newAlerts.push(pvAlert);
+    }
 
     if (!canReportQuota) {
       ignoredQuotaSnapshots = snapshots.length;
@@ -1061,6 +1093,26 @@ export class LedgerStore {
     const recent5h = await this.computeRecent5hStats(nowMs);
     const my5h = recent5h.shareMap.get(memberId) || { geminiSharePct: 0, thirdPartySharePct: 0, requests5h: 0 };
 
+    // 统计本 3P 周周期内的原始 3P 请求次数（即便尚未凑满一次周水位下跌，也能即时识别 3P 违规调用）
+    const p3ResetMs = pools?.["3p"]?.weekly?.resetAt ? Date.parse(pools["3p"].weekly.resetAt) : NaN;
+    const p3CycleStartMs = Number.isFinite(p3ResetMs)
+      ? Math.max(nowMs - 7 * 24 * 3600 * 1000, p3ResetMs - 7 * 24 * 3600 * 1000)
+      : nowMs - 7 * 24 * 3600 * 1000;
+    const p3ReqRows = settings.restrict_3p_for_members
+      ? await this.db.all(
+          `SELECT member_id, SUM(request_count) AS reqs
+             FROM usage_reports
+            WHERE pool_key = '3p'
+              AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
+            GROUP BY member_id`,
+          [p3CycleStartMs]
+        )
+      : [];
+    const p3ReqMap = new Map();
+    for (const r of p3ReqRows) {
+      p3ReqMap.set(r.member_id, Number(r.reqs || 0));
+    }
+
     const isPrepaid = settings.ledger_mode === "prepaid";
     const currentRuleVersion = Math.max(1, Number(settings.rule_version) || 1);
     const acceptedRuleVersion = Math.max(1, Number(member.accepted_rule_version) || 1);
@@ -1070,7 +1122,33 @@ export class LedgerStore {
       pools,
       weekSummary,
       role: member.role,
+      recent3pRequests: p3ReqMap.get(memberId) || 0,
     });
+
+    const broadcastBlackhole = settings.broadcast_blackhole_to_members !== false;
+    const groupAlerts = broadcastBlackhole
+      ? (
+          await this.db.all(
+            `SELECT id, kind, severity, pool_key, missing_pct, title, detail, created_at
+               FROM alerts
+              WHERE acknowledged = 0
+                AND kind IN ('blackhole_warn', 'blackhole_critical')
+                AND created_at >= ?
+              ORDER BY CASE WHEN severity = 'critical' THEN 0 ELSE 1 END, created_at DESC
+              LIMIT 2`,
+            [new Date(nowMs - 6 * 3600 * 1000).toISOString()]
+          )
+        ).map((a) => ({
+          id: a.id,
+          kind: a.kind,
+          severity: a.severity,
+          poolKey: a.pool_key,
+          missingPct: Number(a.missing_pct || 0),
+          title: a.title,
+          detail: a.detail,
+          createdAt: a.created_at,
+        }))
+      : [];
 
     const showPeerShares = settings.show_peer_shares_to_members !== false;
     let peers = [];
@@ -1095,6 +1173,7 @@ export class LedgerStore {
       }
       const capPct = usageRules.memberWeeklyCapPct;
       const applyCapOwner = usageRules.applyCapToOwner;
+      const restrict3p = Boolean(usageRules.restrict3pForMembers);
       peers = peerMembers.map((pm) => {
         const seenMs = pm.last_seen_at ? Date.parse(pm.last_seen_at) : 0;
         const w = pMap.get(pm.id) || { geminiPct: 0, thirdPartyPct: 0 };
@@ -1105,6 +1184,7 @@ export class LedgerStore {
         const displayName = !isSelf
           ? rawPeerName.replace(/[（(]我自己[）)]$/, "").trim() || (pm.role === "owner" ? "组长" : rawPeerName)
           : rawPeerName;
+        const p3Reqs = p3ReqMap.get(pm.id) || 0;
         return {
           name: displayName,
           role: pm.role,
@@ -1115,6 +1195,7 @@ export class LedgerStore {
           recent5hGeminiShare: h5.geminiSharePct,
           recent5hThirdPartyShare: h5.thirdPartySharePct,
           capReached: peerCapApplies && (w.geminiPct >= capPct || w.thirdPartyPct >= capPct),
+          poolViolated: restrict3p && pm.role !== "owner" && (w.thirdPartyPct > 0 || p3Reqs > 0),
         };
       });
     }
@@ -1137,6 +1218,7 @@ export class LedgerStore {
       recentTransactions: recentTx,
       recentAllocations,
       recentRuleChanges,
+      groupAlerts,
       peers,
       pools,
       usageRules,
@@ -1151,6 +1233,8 @@ export class LedgerStore {
         poolReserveFloorPct: usageRules.poolReserveFloorPct,
         memberWeeklyCapPct: usageRules.memberWeeklyCapPct,
         applyCapToOwner: usageRules.applyCapToOwner,
+        restrict3pForMembers: usageRules.restrict3pForMembers,
+        broadcastBlackholeToMembers: broadcastBlackhole,
         usageRuleNote: usageRules.usageRuleNote,
         usageRuleNoteHash: usageRules.usageRuleNoteHash,
         summaryText: formatPricingRuleSummary(settings),
@@ -1211,6 +1295,25 @@ export class LedgerStore {
       reqMap.set(r.member_id, cur);
     }
 
+    const p3ResetAdminMs = pools?.["3p"]?.weekly?.resetAt ? Date.parse(pools["3p"].weekly.resetAt) : NaN;
+    const p3CycleAdminStartMs = Number.isFinite(p3ResetAdminMs)
+      ? Math.max(nowMs - 7 * 24 * 3600 * 1000, p3ResetAdminMs - 7 * 24 * 3600 * 1000)
+      : nowMs - 7 * 24 * 3600 * 1000;
+    const p3ReqAdminRows = settings.restrict_3p_for_members
+      ? await this.db.all(
+          `SELECT member_id, SUM(request_count) AS reqs
+             FROM usage_reports
+            WHERE pool_key = '3p'
+              AND (CASE WHEN event_ts_ms > 0 THEN event_ts_ms ELSE slice_start_ms END) >= ?
+            GROUP BY member_id`,
+          [p3CycleAdminStartMs]
+        )
+      : [];
+    const p3ReqAdminMap = new Map();
+    for (const r of p3ReqAdminRows) {
+      p3ReqAdminMap.set(r.member_id, Number(r.reqs || 0));
+    }
+
     const usageRules = evaluateUsageRulesStatus({
       settings,
       pools,
@@ -1219,6 +1322,7 @@ export class LedgerStore {
     });
     const capPct = usageRules.memberWeeklyCapPct;
     const applyCapOwner = usageRules.applyCapToOwner;
+    const restrict3pAdmin = Boolean(usageRules.restrict3pForMembers);
 
     const members = rawMembers.map((m) => {
       const lastSeenMs = m.last_seen_at ? Date.parse(m.last_seen_at) : 0;
@@ -1231,6 +1335,11 @@ export class LedgerStore {
       const capReached = capApplies && (week.geminiPct >= capPct || week.thirdPartyPct >= capPct);
       const capApproaching =
         capApplies && !capReached && (week.geminiPct >= capPct * 0.85 || week.thirdPartyPct >= capPct * 0.85);
+      const poolViolated =
+        restrict3pAdmin &&
+        m.status === "active" &&
+        m.role !== "owner" &&
+        (week.thirdPartyPct > 0 || (p3ReqAdminMap.get(m.id) || 0) > 0);
       return {
         id: m.id,
         name: m.name,
@@ -1244,6 +1353,7 @@ export class LedgerStore {
         needsRuleConfirm: m.status === "active" && m.role !== "owner" && acceptedVer < currentRuleVersion,
         capReached,
         capApproaching,
+        poolViolated,
         note: m.note || "",
         online,
         lastSeenAt: m.last_seen_at || null,

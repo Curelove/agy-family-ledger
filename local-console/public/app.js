@@ -113,6 +113,7 @@ function renderMemberList(members) {
       if (isOwner) tags.push('<span class="role-tag">我自己</span>');
       if (isPaused) tags.push('<span class="role-tag warn">已暂停</span>');
       if (!isArchived && m.needsRuleConfirm) tags.push('<span class="role-tag warn">待确认新规则</span>');
+      if (!isArchived && m.poolViolated) tags.push('<span class="role-tag warn">误用 3P</span>');
       if (!isArchived && m.capReached) tags.push('<span class="role-tag warn">已达上限参考</span>');
 
       const h5Desc =
@@ -299,11 +300,13 @@ function updateUsageRulePreview() {
   const floor = Math.max(0, Math.min(95, Number($("set-pool-floor").value) || 0));
   const cap = Math.max(0, Math.min(100, Number($("set-member-cap").value) || 0));
   const applyOwner = $("set-apply-cap-owner").checked;
+  const restrict3p = $("set-restrict-3p").checked;
   const note = $("set-usage-note").value.trim();
   const fmtL = (v) => (Number.isInteger(v) ? v + "%" : v.toFixed(1) + "%");
   const parts = [];
   if (floor > 0) parts.push(`总池剩余 ${fmtL(floor)} 时暂停非紧急任务`);
   if (cap > 0) parts.push(`单人每周期上限 ${fmtL(cap)}（${applyOwner ? "全员同等适用" : "适用于普通成员"}）`);
+  if (restrict3p) parts.push("普通成员仅限 Gemini 池（禁用 Claude 3P）");
   if (note) parts.push(`补充说明：${note.length > 36 ? note.slice(0, 36) + "…" : note}`);
   $("usage-rule-preview").textContent = parts.length
     ? `成员侧边栏公示预览：${parts.join("；")}`
@@ -397,11 +400,13 @@ function applyDashboard(dash) {
   }
   $("set-owner-only-quota").checked = (s.quota_snapshot_authority || "owner_only") !== "all_members";
   $("set-show-peers").checked = s.show_peer_shares_to_members !== false;
+  $("set-broadcast-blackhole").checked = s.broadcast_blackhole_to_members !== false;
   $("set-gem-price").value = ((Number(s.gemini_fen_per_weekly_pct) || 100) / 100).toFixed(2);
   $("set-3p-price").value = ((Number(s.third_party_fen_per_weekly_pct) || 180) / 100).toFixed(2);
   $("set-pool-floor").value = Number(s.pool_reserve_floor_pct || 0);
   $("set-member-cap").value = Number(s.member_weekly_cap_pct || 0);
   $("set-apply-cap-owner").checked = s.apply_cap_to_owner !== false;
+  $("set-restrict-3p").checked = Boolean(s.restrict_3p_for_members);
   $("set-usage-note").value = s.usage_rule_note || "";
   $("set-warn-pct").value = Number(s.blackhole_warn_missing_pct) || 5;
   $("set-crit-pct").value = Number(s.blackhole_critical_missing_pct) || 15;
@@ -584,6 +589,7 @@ document.querySelectorAll("[data-rule-preset]").forEach((chip) => {
     if (preset === "clear") {
       $("set-pool-floor").value = "0";
       $("set-member-cap").value = "0";
+      $("set-restrict-3p").checked = false;
       $("set-usage-note").value = "";
     } else if (preset === "floor20") {
       $("set-pool-floor").value = "20";
@@ -681,6 +687,7 @@ $("set-3p-price").addEventListener("input", updatePricePreview);
 $("set-pool-floor").addEventListener("input", updateUsageRulePreview);
 $("set-member-cap").addEventListener("input", updateUsageRulePreview);
 $("set-apply-cap-owner").addEventListener("change", updateUsageRulePreview);
+$("set-restrict-3p").addEventListener("change", updateUsageRulePreview);
 $("set-usage-note").addEventListener("input", updateUsageRulePreview);
 
 $("btn-save-settings").addEventListener("click", async () => {
@@ -693,11 +700,13 @@ $("btn-save-settings").addEventListener("click", async () => {
         ledger_mode: ledgerMode,
         quota_snapshot_authority: $("set-owner-only-quota").checked ? "owner_only" : "all_members",
         show_peer_shares_to_members: $("set-show-peers").checked,
+        broadcast_blackhole_to_members: $("set-broadcast-blackhole").checked,
         gemini_fen_per_weekly_pct: Math.round((Number($("set-gem-price").value) || 1) * 100),
         third_party_fen_per_weekly_pct: Math.round((Number($("set-3p-price").value) || 1.8) * 100),
         pool_reserve_floor_pct: Math.max(0, Math.min(95, Number($("set-pool-floor").value) || 0)),
         member_weekly_cap_pct: Math.max(0, Math.min(100, Number($("set-member-cap").value) || 0)),
         apply_cap_to_owner: $("set-apply-cap-owner").checked,
+        restrict_3p_for_members: $("set-restrict-3p").checked,
         usage_rule_note: $("set-usage-note").value.trim().slice(0, 180),
         blackhole_warn_missing_pct: Number($("set-warn-pct").value) || 5,
         blackhole_critical_missing_pct: Number($("set-crit-pct").value) || 15,

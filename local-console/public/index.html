@@ -273,6 +273,13 @@
                 </div>
                 <input type="checkbox" id="set-apply-cap-owner" class="switch" checked/>
               </div>
+              <div class="toggle-row nested">
+                <div>
+                  <div class="toggle-title">普通成员仅限使用 Gemini 池（禁用 Claude 3P）</div>
+                  <div class="toggle-sub">开启后一旦检测到普通成员产生 Claude 3P 调用，其侧边栏顶部立即弹出红色强警示并写入组长异常记录。</div>
+                </div>
+                <input type="checkbox" id="set-restrict-3p" class="switch"/>
+              </div>
               <div class="form-field" style="margin-bottom:8px;">
                 <label for="set-usage-note">补充约定说明（选填，最多 180 字）</label>
                 <input id="set-usage-note" type="text" maxlength="180" placeholder="例如：周池低于 20% 时优先留给有紧急任务的成员，临近重置若余量充足可放开"/>
@@ -294,6 +301,14 @@
                 <div class="toggle-sub">成员侧边栏可查看全组每个人的本周期占比与近 5 小时活跃度（不含任何余额或密钥），方便大家错峰使用。</div>
               </div>
               <input type="checkbox" id="set-show-peers" class="switch" checked/>
+            </div>
+
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-title">向全体成员侧边栏公示未统计消耗（黑洞）异常</div>
+                <div class="toggle-sub">开启后当检测到明显未匹配本地插件的掉量异常时，全体组员侧边栏顶部也会同步弹出提醒以便自查；组长标为已读后自动撤下。</div>
+              </div>
+              <input type="checkbox" id="set-broadcast-blackhole" class="switch" checked/>
             </div>
 
             <div class="field-pair">

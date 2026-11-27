@@ -14,7 +14,7 @@ import http from "node:http";
 import tls from "node:tls";
 import crypto from "node:crypto";
 
-const CLIENT_VERSION = "1.4.0";
+const CLIENT_VERSION = "1.5.0";
 const MAX_PENDING_QUEUE = 1500;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES_PER_POLL = 8 * 1024 * 1024;
@@ -76,12 +76,14 @@ export function formatAgreedRuleSummary(rules) {
   const floor = normalizePctLimit(rules.poolReserveFloorPct, 95);
   const cap = normalizePctLimit(rules.memberWeeklyCapPct, 100);
   const applyOwner = rules.applyCapToOwner !== false;
+  const restrict3p = Boolean(rules.restrict3pForMembers);
   const note = sanitizeUsageRuleNote(rules.usageRuleNote);
   const noteHash = String(rules.usageRuleNoteHash || "").trim();
 
   const convParts = [];
   if (floor > 0) convParts.push(`总池剩余 ${fmtPctLabel(floor)} 时暂停非紧急任务`);
   if (cap > 0) convParts.push(`单人每周期上限 ${fmtPctLabel(cap)}（${applyOwner ? "全员同等适用" : "适用于普通成员"}）`);
+  if (restrict3p) convParts.push("普通成员仅限 Gemini 池（禁用 Claude 3P）");
   if (note) convParts.push(`补充说明：${note.length > 40 ? note.slice(0, 40) + "…" : note}`);
   else if (noteHash) convParts.push("含文字补充约定");
   const convSummary = convParts.join("；");
@@ -99,7 +101,7 @@ export function formatAgreedRuleSummary(rules) {
 
 /**
  * 构造含初始规则与全组使用约定的纯文本绑定码：
- * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>[&rf=<floor>&mc=<cap>&ao=<1|0>&nh=<hash>]
+ * https://<domain>#<token>&v=<ruleVersion>&m=<board|prepaid>&g=<gemFen>&p=<3pFen>[&rf=<floor>&mc=<cap>&ao=<1|0>&r3p=<1>&nh=<hash>]
  */
 export function buildInviteCode({
   serverUrl = "",
@@ -111,6 +113,7 @@ export function buildInviteCode({
   poolReserveFloorPct = 0,
   memberWeeklyCapPct = 0,
   applyCapToOwner = true,
+  restrict3pForMembers = false,
   usageRuleNote = "",
 } = {}) {
   const cleanUrl = String(serverUrl || "").trim().replace(/\/+$/, "");
@@ -122,11 +125,13 @@ export function buildInviteCode({
   const rf = normalizePctLimit(poolReserveFloorPct, 95);
   const mc = normalizePctLimit(memberWeeklyCapPct, 100);
   const ao = applyCapToOwner === false ? 0 : 1;
+  const r3p = restrict3pForMembers ? 1 : 0;
   const nh = computeRuleNoteHash(usageRuleNote);
 
   let frag = `${cleanToken}&v=${v}&m=${modeShort}&g=${g}&p=${p}`;
-  if (rf > 0 || mc > 0 || ao === 0 || nh) {
+  if (rf > 0 || mc > 0 || ao === 0 || r3p === 1 || nh) {
     frag += `&rf=${rf}&mc=${mc}&ao=${ao}`;
+    if (r3p === 1) frag += `&r3p=1`;
     if (nh) frag += `&nh=${nh}`;
   }
   return `${cleanUrl}#${frag}`;
@@ -179,6 +184,7 @@ export function parseInviteCode(raw = "") {
     const rawRf = params.get("rf");
     const rawMc = params.get("mc");
     const rawAo = params.get("ao");
+    const rawR3p = params.get("r3p");
     const rawNh = String(params.get("nh") || "").trim().toLowerCase();
     if (Number.isFinite(rawV) && rawV >= 1 && (rawM === "board" || rawM === "prepaid")) {
       agreedRules = {
@@ -189,6 +195,7 @@ export function parseInviteCode(raw = "") {
         poolReserveFloorPct: rawRf !== null ? normalizePctLimit(rawRf, 95) : 0,
         memberWeeklyCapPct: rawMc !== null ? normalizePctLimit(rawMc, 100) : 0,
         applyCapToOwner: rawAo === "0" ? false : true,
+        restrict3pForMembers: rawR3p === "1",
         usageRuleNote: "",
         usageRuleNoteHash: /^[0-9a-f]{8}$/.test(rawNh) ? rawNh : "",
         agreedAt: new Date().toISOString(),
@@ -242,6 +249,8 @@ export function evaluateRuleMismatch(agreedRules, memberView) {
   const serverCap = normalizePctLimit(serverPricing.memberWeeklyCapPct, 100);
   const localApplyOwner = agreedRules.applyCapToOwner !== false;
   const serverApplyOwner = serverPricing.applyCapToOwner !== false;
+  const localRestrict3p = Boolean(agreedRules.restrict3pForMembers);
+  const serverRestrict3p = Boolean(serverPricing.restrict3pForMembers);
   const localNoteHash =
     String(agreedRules.usageRuleNoteHash || "").trim() || computeRuleNoteHash(agreedRules.usageRuleNote || "");
   const serverNoteHash =
@@ -251,6 +260,7 @@ export function evaluateRuleMismatch(agreedRules, memberView) {
     localFloor !== serverFloor ||
     localCap !== serverCap ||
     (serverCap > 0 && localApplyOwner !== serverApplyOwner) ||
+    localRestrict3p !== serverRestrict3p ||
     localNoteHash !== serverNoteHash;
 
   if (serverNeedsConfirm || modeDiff || priceDiff || conventionDiff || serverVersion > localVer) {
@@ -944,6 +954,7 @@ export class MemberLedgerCollector {
     } catch {}
     this.state.lastMemberView = null;
     this.state.lastError = "";
+    this.state.accountBlocked = null;
     this.saveState();
     return this.getPublicState();
   }
@@ -975,6 +986,7 @@ export class MemberLedgerCollector {
       pendingQueueCount: Array.isArray(this.state.pendingEvents) ? this.state.pendingEvents.length : 0,
       lastSyncAt: this.state.lastSyncAt || null,
       lastError: this.state.lastError || "",
+      accountBlocked: this.state.accountBlocked || null,
       localSnapshots: this.state.lastLocalSnapshots || [],
       memberView: mv,
       clientVersion: CLIENT_VERSION,
@@ -1016,6 +1028,7 @@ export class MemberLedgerCollector {
             poolReserveFloorPct: normalizePctLimit(p.poolReserveFloorPct, 95),
             memberWeeklyCapPct: normalizePctLimit(p.memberWeeklyCapPct, 100),
             applyCapToOwner: p.applyCapToOwner !== false,
+            restrict3pForMembers: Boolean(p.restrict3pForMembers),
             usageRuleNote: sanitizeUsageRuleNote(p.usageRuleNote || ""),
             usageRuleNoteHash: String(p.usageRuleNoteHash || "") || computeRuleNoteHash(p.usageRuleNote || ""),
             agreedAt: new Date().toISOString(),
@@ -1104,6 +1117,7 @@ export class MemberLedgerCollector {
       const data = lastData || {};
       this.state.lastSyncAt = new Date().toISOString();
       this.state.lastError = "";
+      this.state.accountBlocked = null;
       if (data.member) {
         this.state.lastMemberView = data.member;
         // 兼容旧版短绑定码：若首次同步时尚未记录 agreedRules，自动锁定入组基线规则
@@ -1118,6 +1132,7 @@ export class MemberLedgerCollector {
               poolReserveFloorPct: normalizePctLimit(p.poolReserveFloorPct, 95),
               memberWeeklyCapPct: normalizePctLimit(p.memberWeeklyCapPct, 100),
               applyCapToOwner: p.applyCapToOwner !== false,
+              restrict3pForMembers: Boolean(p.restrict3pForMembers),
               usageRuleNote: sanitizeUsageRuleNote(p.usageRuleNote || ""),
               usageRuleNoteHash: String(p.usageRuleNoteHash || "") || computeRuleNoteHash(p.usageRuleNote || ""),
               agreedAt: new Date().toISOString(),
@@ -1183,11 +1198,35 @@ export class MemberLedgerCollector {
       return { ok: true, state: this.getPublicState() };
     } catch (err) {
       const rawMsg = String(err?.message || err);
-      const proxyHint =
-        !this.config.proxyUrl && /fetch failed|timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND/i.test(rawMsg)
-          ? "（若使用 *.workers.dev 且未开 TUN，可在「连接配置」中填入本地代理地址或改用自定义域名）"
-          : "";
-      this.state.lastError = `同步暂未送达（已暂存本地队列，联网自动补传）：${rawMsg}${proxyHint}`;
+      if (/已被组长暂停/.test(rawMsg)) {
+        this.state.accountBlocked = {
+          kind: "paused",
+          title: "账号同步已被组长暂停",
+          detail: "你的成员同步状态当前处于暂停中，请先停止运行较重任务并联系组长恢复。",
+        };
+        this.state.lastError = "";
+      } else if (/凭证已停用|已停用/.test(rawMsg)) {
+        this.state.accountBlocked = {
+          kind: "archived",
+          title: "成员绑定码已停用",
+          detail: "当前绑定码已被组长停用，如需继续使用请联系组长获取新绑定码并在底部「连接配置」中更换。",
+        };
+        this.state.lastError = "";
+      } else if (/无效的成员凭证/.test(rawMsg)) {
+        this.state.accountBlocked = {
+          kind: "invalid_token",
+          title: "成员绑定码已失效",
+          detail: "服务端未识别当前绑定码（可能已被组长重置），请联系组长获取新绑定码并在「连接配置」中重新粘贴。",
+        };
+        this.state.lastError = "";
+      } else {
+        this.state.accountBlocked = null;
+        const proxyHint =
+          !this.config.proxyUrl && /fetch failed|timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND/i.test(rawMsg)
+            ? "（若使用 *.workers.dev 且未开 TUN，可在「连接配置」中填入本地代理地址或改用自定义域名）"
+            : "";
+        this.state.lastError = `同步暂未送达（已暂存本地队列，联网自动补传）：${rawMsg}${proxyHint}`;
+      }
       this.saveState();
       return { ok: false, reason: rawMsg || "sync_failed", state: this.getPublicState() };
     }

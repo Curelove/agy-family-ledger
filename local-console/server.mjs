@@ -210,6 +210,7 @@ async function buildMemberInviteInfo(memberId, serverPort) {
   const poolReserveFloorPct = Number(s.pool_reserve_floor_pct) || 0;
   const memberWeeklyCapPct = Number(s.member_weekly_cap_pct) || 0;
   const applyCapToOwner = s.apply_cap_to_owner !== false;
+  const restrict3pForMembers = Boolean(s.restrict_3p_for_members);
   const usageRuleNote = String(s.usage_rule_note || "").trim();
 
   const inviteCode = buildInviteCode({
@@ -222,6 +223,7 @@ async function buildMemberInviteInfo(memberId, serverPort) {
     poolReserveFloorPct,
     memberWeeklyCapPct,
     applyCapToOwner,
+    restrict3pForMembers,
     usageRuleNote,
   });
   const isLocalOnly = /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(targetUrl);
@@ -474,7 +476,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         ok: true,
         app: "agy-family-ledger-console",
-        version: "1.4.0",
+        version: "1.5.0",
         mode: cfg.mode,
         port: PORT,
       });
@@ -629,7 +631,7 @@ server.listen(PORT, "127.0.0.1", () => {
     JSON.stringify({
       ok: true,
       app: "agy-family-ledger-console",
-      version: "1.4.0",
+      version: "1.5.0",
       url: `http://127.0.0.1:${PORT}`,
       mode: loadConsoleConfig().mode,
     })
