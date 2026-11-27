@@ -166,7 +166,7 @@
     background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 13px 14px; margin-bottom: 11px;
   }
-  .sheet-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .sheet-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .label { font-size: 12px; color: var(--muted); font-weight: 700; }
   .ident-badge { font-size: 12px; color: var(--ink-soft); font-weight: 600; }
 
@@ -406,6 +406,172 @@
   }
   .btn-link-soft:hover { background: var(--well); }
   .update-summary-badge.has-new { color: var(--pine) !important; font-weight: 700 !important; }
+
+  .sync-status-pill {
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-size: 11.5px;
+    font-weight: 600;
+    line-height: 1.4;
+    gap: 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .sync-status-pill.is-ok {
+    background: var(--pine-soft);
+    color: var(--pine);
+    border-color: #C7DED9;
+  }
+  .sync-status-pill.is-ok:hover { background: #D7EAE5; border-color: #A6CCC3; }
+  .sync-status-pill.is-syncing {
+    background: var(--well);
+    color: var(--ink-soft);
+    border-color: var(--border);
+  }
+  .sync-status-pill.is-pending {
+    background: var(--amber-soft);
+    color: #7C4B1F;
+    border-color: #E2C199;
+  }
+  .sync-status-pill.is-pending:hover { background: #F1E0CA; border-color: #D4AB78; }
+  .sync-status-pill.is-err {
+    background: var(--vermilion-soft);
+    color: #8F3022;
+    border-color: #EBC0B8;
+  }
+  .sync-status-pill.is-err:hover { background: #F7D9D3; border-color: #DDA398; }
+  .sync-status-pill.is-idle {
+    background: var(--paper);
+    color: var(--muted);
+    border-color: var(--border);
+  }
+  .sync-pill-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .sync-status-pill.is-syncing .sync-pill-dot {
+    animation: syncPulse 1.1s ease-in-out infinite;
+  }
+  @keyframes syncPulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+  .sync-pill-caret {
+    font-size: 10px;
+    line-height: 1;
+    opacity: 0.78;
+    transition: transform 0.16s ease;
+    display: inline-block;
+  }
+  .sync-status-pill[aria-expanded="true"] .sync-pill-caret {
+    transform: rotate(180deg);
+  }
+  .sync-drawer {
+    margin-top: 9px;
+    padding: 10px 11px;
+    border-radius: 9px;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--ink-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .sync-drawer-rows { display: flex; flex-direction: column; gap: 4px; }
+  .sync-drawer-kv {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12px;
+  }
+  .sync-drawer-kv .k { color: var(--muted); flex-shrink: 0; }
+  .sync-drawer-kv .v {
+    color: var(--ink);
+    font-weight: 600;
+    text-align: right;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .sync-drawer-desc {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--muted);
+    padding-top: 5px;
+    border-top: 1px dashed var(--border);
+  }
+  .sync-drawer-list {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sync-drawer-list-title {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--ink-soft);
+    margin-bottom: 1px;
+  }
+  .sync-drawer-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    padding-top: 3px;
+    border-top: 1px dashed #ECE5D8;
+  }
+  .sync-drawer-item:first-of-type { border-top: none; padding-top: 0; }
+  .sync-drawer-item-left {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+  .sync-drawer-model {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  .sync-drawer-pool {
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .sync-drawer-pool.gem { background: var(--amber-soft); color: #7C4B1F; }
+  .sync-drawer-pool.p3 { background: var(--pine-soft); color: var(--pine); }
+  .sync-drawer-time {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .sync-drawer-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .sync-drawer-btn { padding: 3px 9px; font-size: 11.5px; }
 </style>
 </head>
 <body>
@@ -534,7 +700,20 @@
   <section class="sheet" id="my-usage-card">
     <div class="sheet-head">
       <span class="label">我本周期的用量</span>
-      <span style="font-size:12px;color:var(--muted);">待传记录 <strong id="queue-count">0</strong></span>
+      <button type="button" class="sync-status-pill is-idle" id="btn-queue-detail" aria-expanded="false" aria-controls="sync-queue-drawer" title="点击查看本地记录同步状态与明细">
+        <span class="sync-pill-dot"></span>
+        <span id="queue-status-text">已全部同步</span>
+        <span class="sync-pill-caret">▾</span>
+      </button>
+    </div>
+    <div class="sync-drawer" id="sync-queue-drawer" hidden>
+      <div class="sync-drawer-rows" id="sync-drawer-meta"></div>
+      <div class="sync-drawer-desc" id="sync-drawer-desc"></div>
+      <div class="sync-drawer-list" id="sync-drawer-list" hidden></div>
+      <div class="sync-drawer-foot">
+        <span id="sync-drawer-hint">每 90 秒自动增量上传</span>
+        <button type="button" class="sync-drawer-btn" id="btn-drawer-sync">立即同步</button>
+      </div>
     </div>
     <div class="week-grid">
       <div class="stat-cell" id="my-gem-cell">
@@ -645,6 +824,8 @@ let latestStateCache = null;
 let latestUpdateInfo = null;
 let sessionDismissedUpdateVer = "";
 let startupUpdateChecked = false;
+let syncDrawerOpen = false;
+let fastFollowupTimer = null;
 
 function postHeaders() {
   const h = { "Content-Type": "application/json" };
@@ -820,6 +1001,136 @@ function renderAlertStack(cards) {
     .join("");
 }
 
+function fmtClockTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function getSafeHostLabel(serverUrl) {
+  const raw = String(serverUrl || "").trim();
+  if (!raw) return "未配置";
+  try {
+    return new URL(raw).host || raw;
+  } catch {
+    return raw.replace(/^https?:\/\//i, "").split("/")[0] || raw;
+  }
+}
+
+function renderSyncQueueUi(state) {
+  const btn = $("btn-queue-detail");
+  const textEl = $("queue-status-text");
+  const drawer = $("sync-queue-drawer");
+  const metaEl = $("sync-drawer-meta");
+  const descEl = $("sync-drawer-desc");
+  const listEl = $("sync-drawer-list");
+  const hintEl = $("sync-drawer-hint");
+  const syncBtn = $("btn-drawer-sync");
+
+  const configured = Boolean(state?.configured);
+  const inFlight = Boolean(state?.syncInFlight);
+  const pending = Math.max(0, Number(state?.pendingQueueCount || 0));
+  const preview = Array.isArray(state?.pendingQueuePreview) ? state.pendingQueuePreview : [];
+  const lastBatch = state?.lastSyncedBatch && typeof state.lastSyncedBatch === "object" ? state.lastSyncedBatch : null;
+  const blocked = state?.accountBlocked || null;
+  const hasErr = Boolean(state?.lastError);
+  const intervalSec = Number(state?.config?.syncIntervalSec || 90);
+  const hostLabel = getSafeHostLabel(state?.config?.serverUrl);
+
+  let cls = "is-ok";
+  let label = "已全部同步";
+  if (!configured) {
+    cls = "is-idle";
+    label = "未连接";
+  } else if (inFlight) {
+    cls = "is-syncing";
+    label = pending > 0 ? "正在同步 " + pending + " 条…" : "正在同步…";
+  } else if (blocked && pending > 0) {
+    cls = "is-err";
+    label = "已暂存 " + pending + " 条";
+  } else if (blocked) {
+    cls = "is-err";
+    label = "同步已暂停";
+  } else if (pending > 0 && hasErr) {
+    cls = "is-err";
+    label = "暂存待补传 " + pending + " 条";
+  } else if (pending > 0) {
+    cls = "is-pending";
+    label = "待同步 " + pending + " 条";
+  } else if (hasErr) {
+    cls = "is-err";
+    label = "等待重连";
+  } else {
+    cls = "is-ok";
+    label = "已全部同步";
+  }
+
+  btn.className = "sync-status-pill " + cls;
+  btn.setAttribute("aria-expanded", syncDrawerOpen ? "true" : "false");
+  textEl.textContent = label;
+  drawer.hidden = !syncDrawerOpen;
+
+  if (!syncDrawerOpen) return;
+
+  const queueStateText = pending > 0
+    ? pending + " 条" + (inFlight ? "（上传中）" : hasErr || blocked ? "（暂存待补传）" : "（待下次同步）")
+    : "0 条（已全部送达）";
+  const lastSyncStr = state?.lastSyncAt ? fmtClockTime(state.lastSyncAt) : "尚未完成";
+
+  metaEl.innerHTML =
+    '<div class="sync-drawer-kv"><span class="k">本机暂存队列</span><span class="v">' + esc(queueStateText) + "</span></div>" +
+    '<div class="sync-drawer-kv"><span class="k">最近成功同步</span><span class="v">' + esc(lastSyncStr) + "</span></div>" +
+    '<div class="sync-drawer-kv"><span class="k">上传目标服务</span><span class="v" title="' + esc(hostLabel) + '">' + esc(hostLabel) + "</span></div>";
+
+  if (!configured) {
+    descEl.textContent = "粘贴组长提供的单行绑定码后，插件才会把本机对话步骤的纯数字 Token 计数上传到家庭组中转服务。";
+  } else if (inFlight) {
+    descEl.textContent = "正在将本机 Antigravity 对话日志中新增的纯数字 Token 计数发往云端中转，签收后会自动清零，无需手动处理。";
+  } else if (blocked) {
+    descEl.textContent = "因当前账号状态受限，新增用量暂存在本机队列中以防丢账，恢复连接后会自动补传。";
+  } else if (pending > 0 && hasErr) {
+    descEl.textContent = "上次发往云端暂未连通，这 " + pending + " 条本机记录已安全保存在本地队列（仅含 Token 计数与模型名），网络恢复后会自动补传。";
+  } else if (pending > 0) {
+    descEl.textContent = "刚从本机对话日志扫描到 " + pending + " 条新步骤记录，将在下次心跳自动上传，也可以直接点下方「立即同步」。";
+  } else {
+    descEl.textContent = "数据来自本机 Antigravity 对话日志（仅提取纯数字 Token 计数、模型名与时间戳，不读取正文），已全部送达云端用于周池占比分摊。";
+  }
+
+  const renderItems = (title, items) => {
+    const rows = items.slice(0, 5).map((it) => {
+      const is3p = it.poolKey === "3p";
+      const poolTag = '<span class="sync-drawer-pool ' + (is3p ? "p3" : "gem") + '">' + (is3p ? "3P" : "Gemini") + "</span>";
+      const modelTxt = it.modelName || (is3p ? "Claude 3P" : "Gemini");
+      const timeTxt = it.timestampMs ? fmtClockTime(it.timestampMs) : "";
+      return (
+        '<div class="sync-drawer-item">' +
+        '<div class="sync-drawer-item-left">' + poolTag + '<span class="sync-drawer-model" title="' + esc(modelTxt) + '">' + esc(modelTxt) + "</span></div>" +
+        '<span class="sync-drawer-time">' + esc(timeTxt) + "</span>" +
+        "</div>"
+      );
+    }).join("");
+    listEl.hidden = false;
+    listEl.innerHTML = '<div class="sync-drawer-list-title">' + esc(title) + "</div>" + rows;
+  };
+
+  if (pending > 0 && preview.length > 0) {
+    renderItems("当前暂存记录（显示前 " + Math.min(5, preview.length) + " / " + pending + " 条）", preview);
+  } else if (lastBatch && Number(lastBatch.count || 0) > 0 && Array.isArray(lastBatch.items) && lastBatch.items.length > 0) {
+    const tLabel = lastBatch.syncedAt ? " · " + fmtClockTime(lastBatch.syncedAt) : "";
+    renderItems("最近一批已送达（共 " + Number(lastBatch.count) + " 条" + tLabel + "）", lastBatch.items);
+  } else {
+    listEl.hidden = true;
+    listEl.innerHTML = "";
+  }
+
+  hintEl.textContent = "每 " + intervalSec + " 秒自动增量扫描并上传";
+  if (syncBtn) {
+    syncBtn.disabled = !configured || inFlight;
+    syncBtn.textContent = inFlight ? "同步中…" : pending > 0 ? "立即补传" : "立即同步";
+  }
+}
+
 function render(state) {
   latestStateCache = state;
   renderUpdateUi(state);
@@ -856,7 +1167,7 @@ function render(state) {
     syncText.textContent = "已同步 · " + t;
   }
 
-  $("queue-count").textContent = String(state.pendingQueueCount || 0);
+  renderSyncQueueUi(state);
   $("cfg-status").textContent = state.configured ? "已连接 (" + state.config.tokenPreview + ")" : "未连接";
 
   $("banner-err").classList.remove("show");
@@ -1332,6 +1643,17 @@ async function loadState() {
   const res = await fetch("/api/state");
   const st = await res.json();
   render(st);
+  if (st?.syncInFlight) {
+    if (!fastFollowupTimer) {
+      fastFollowupTimer = setTimeout(() => {
+        fastFollowupTimer = null;
+        loadState().catch(() => {});
+      }, 2500);
+    }
+  } else if (fastFollowupTimer) {
+    clearTimeout(fastFollowupTimer);
+    fastFollowupTimer = null;
+  }
   if (!startupUpdateChecked) {
     startupUpdateChecked = true;
     if (st?.config?.autoCheckUpdates !== false) {
@@ -1395,15 +1717,28 @@ $("update-status-box").addEventListener("click", async (e) => {
   }
 });
 
-$("btn-sync").addEventListener("click", async () => {
-  $("btn-sync").disabled = true;
+async function triggerManualSync() {
+  const topBtn = $("btn-sync");
+  const drawerBtn = $("btn-drawer-sync");
+  if (topBtn) topBtn.disabled = true;
+  if (drawerBtn) {
+    drawerBtn.disabled = true;
+    drawerBtn.textContent = "同步中…";
+  }
   try {
     const res = await fetch("/api/sync-now", { method: "POST", headers: postHeaders(), body: "{}" });
     const data = await res.json();
     if (data.state) render(data.state);
   } finally {
-    $("btn-sync").disabled = false;
+    if (topBtn) topBtn.disabled = false;
   }
+}
+
+$("btn-sync").addEventListener("click", triggerManualSync);
+$("btn-drawer-sync").addEventListener("click", triggerManualSync);
+$("btn-queue-detail").addEventListener("click", () => {
+  syncDrawerOpen = !syncDrawerOpen;
+  if (latestStateCache) renderSyncQueueUi(latestStateCache);
 });
 
 $("btn-bind-onboard").addEventListener("click", () => {

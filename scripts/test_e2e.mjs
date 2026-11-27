@@ -688,9 +688,18 @@ try {
         outputTokens: 200,
         timestampMs: now - (180 - idx) * 1000,
       }));
+      const beforeSync = col.getPublicState();
+      assert.equal(beforeSync.pendingQueueCount, 180);
+      assert.equal(beforeSync.pendingQueuePreview.length, 6, "待传预览最多返回 6 条精简摘要");
+      assert.equal(beforeSync.syncInFlight, false);
+
       const res = await col.syncOnce();
       assert.equal(res.ok, true);
       assert.equal(res.state.pendingQueueCount, 0, "180 条积压记录应在同一轮同步内按 80/80/20 自动清空");
+      assert.equal(res.state.pendingQueuePreview.length, 0);
+      assert.equal(res.state.syncInFlight, false);
+      assert.equal(res.state.lastSyncedBatch?.count, 180, "应保留最近一批已送达总数用于点击详情查看");
+      assert.equal(res.state.lastSyncedBatch?.items?.length, 6, "最近一批已送达明细应保留最多 6 条模型摘要");
       assert.equal(reqCount, 3, "180 条应拆分为 3 次请求（80 + 80 + 20）");
       assert.ok(batchCalls >= 5, "服务端应使用 adapter.batch 分块写入");
       const cntRow = await wrappedAdapter.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [m.id]);

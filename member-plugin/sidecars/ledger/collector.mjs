@@ -820,6 +820,15 @@ async function postJsonRequest(endpoint, headers = {}, bodyObj = {}, { proxyUrl 
   });
 }
 
+function summarizeEventForUi(ev = {}) {
+  return {
+    poolKey: ev.poolKey === "3p" ? "3p" : "gemini",
+    modelName: String(ev.modelName || "").slice(0, 80),
+    requestCount: Math.max(1, Math.round(Number(ev.requestCount) || 1)),
+    timestampMs: Number.isFinite(Number(ev.timestampMs)) ? Number(ev.timestampMs) : 0,
+  };
+}
+
 export class MemberLedgerCollector {
   constructor({ configPath, defaultConfigPath, statePath = getDefaultStatePath(), transcriptRoots = null }) {
     this.configPath = configPath;
@@ -828,11 +837,13 @@ export class MemberLedgerCollector {
     this.transcriptRoots = transcriptRoots;
     this._configMtimeMs = 0;
     this._syncInFlight = null;
+    this._isSyncing = false;
     this.config = this.loadConfig();
     this.state = readJsonSafe(this.statePath, {
       installedAtMs: Date.now(),
       fileOffsets: {},
       pendingEvents: [],
+      lastSyncedBatch: null,
       lastSyncAt: null,
       lastError: "",
       lastMemberView: null,
@@ -955,6 +966,7 @@ export class MemberLedgerCollector {
     this.state.lastMemberView = null;
     this.state.lastError = "";
     this.state.accountBlocked = null;
+    this.state.lastSyncedBatch = null;
     this.saveState();
     return this.getPublicState();
   }
@@ -983,7 +995,12 @@ export class MemberLedgerCollector {
         ignoredUpdateVersion: String(this.config.ignoredUpdateVersion || ""),
       },
       ruleMismatch,
+      syncInFlight: Boolean(this._isSyncing),
       pendingQueueCount: Array.isArray(this.state.pendingEvents) ? this.state.pendingEvents.length : 0,
+      pendingQueuePreview: Array.isArray(this.state.pendingEvents)
+        ? this.state.pendingEvents.slice(0, 6).map(summarizeEventForUi)
+        : [],
+      lastSyncedBatch: this.state.lastSyncedBatch || null,
       lastSyncAt: this.state.lastSyncAt || null,
       lastError: this.state.lastError || "",
       accountBlocked: this.state.accountBlocked || null,
@@ -1046,7 +1063,9 @@ export class MemberLedgerCollector {
     if (this._syncInFlight) {
       return await this._syncInFlight;
     }
+    this._isSyncing = true;
     this._syncInFlight = this._runSyncOnce().finally(() => {
+      this._isSyncing = false;
       this._syncInFlight = null;
     });
     return await this._syncInFlight;
@@ -1078,6 +1097,7 @@ export class MemberLedgerCollector {
     if (!this.config.serverUrl || !this.config.memberToken) {
       this.state.lastError = "尚未填写绑定码";
       this.saveState();
+      this._isSyncing = false;
       return { ok: false, reason: "not_configured", state: this.getPublicState() };
     }
 
@@ -1086,6 +1106,7 @@ export class MemberLedgerCollector {
     try {
       // 单次心跳最多携带 80 条记录并给足 25 秒超时；若有积压队列则连续分批平滑补传（单轮最多 4 批）
       let lastData = null;
+      const sentEventsThisRun = [];
       const MAX_DRAIN_ROUNDS = 4;
       for (let round = 0; round < MAX_DRAIN_ROUNDS; round++) {
         const batch = this.state.pendingEvents.slice(0, 80);
@@ -1109,13 +1130,22 @@ export class MemberLedgerCollector {
           throw new Error(data?.error || `中转服务返回 HTTP ${status}`);
         }
         // 按精确已送达 ID 剔除，绝不误删请求在途期间新采集到的事件
+        if (batch.length > 0) sentEventsThisRun.push(...batch);
         this.state.pendingEvents = this.state.pendingEvents.filter((e) => !batchIds.has(e.id));
         lastData = data;
         if (this.state.pendingEvents.length === 0) break;
       }
 
       const data = lastData || {};
-      this.state.lastSyncAt = new Date().toISOString();
+      const syncedAtIso = new Date().toISOString();
+      this.state.lastSyncAt = syncedAtIso;
+      if (sentEventsThisRun.length > 0) {
+        this.state.lastSyncedBatch = {
+          count: sentEventsThisRun.length,
+          syncedAt: syncedAtIso,
+          items: sentEventsThisRun.slice(-6).reverse().map(summarizeEventForUi),
+        };
+      }
       this.state.lastError = "";
       this.state.accountBlocked = null;
       if (data.member) {
@@ -1195,6 +1225,7 @@ export class MemberLedgerCollector {
         }
       }
       this.saveState();
+      this._isSyncing = false;
       return { ok: true, state: this.getPublicState() };
     } catch (err) {
       const rawMsg = String(err?.message || err);
@@ -1228,6 +1259,7 @@ export class MemberLedgerCollector {
         this.state.lastError = `同步暂未送达（已暂存本地队列，联网自动补传）：${rawMsg}${proxyHint}`;
       }
       this.saveState();
+      this._isSyncing = false;
       return { ok: false, reason: rawMsg || "sync_failed", state: this.getPublicState() };
     }
   }
