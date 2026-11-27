@@ -622,6 +622,70 @@ try {
     }
   });
 
+  // 15. 大批量积压队列（180 条记录）通过 batch 分批入库并一次同步清空队列
+  await test("performance:180-queued-events-drain-in-80-item-batches-via-db-batch", async () => {
+    const db4 = new DatabaseSync(":memory:");
+    let batchCalls = 0;
+    const baseAdapter = wrapNodeSqliteAdapter(db4);
+    const wrappedAdapter = {
+      ...baseAdapter,
+      async batch(stmts) {
+        batchCalls++;
+        return await baseAdapter.batch(stmts);
+      },
+    };
+    const s4 = new LedgerStore(wrappedAdapter);
+    await s4.ensureSchema(SCHEMA_SQL);
+    const m = await s4.createMember({ name: "重度成员丁" });
+
+    let reqCount = 0;
+    const srv = http.createServer(async (req, res) => {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      const tok = req.headers["x-member-token"] || "";
+      reqCount++;
+      assert.ok((body.usageEvents || []).length <= 80, "单次心跳上报记录数不得超过 80 条");
+      const out = await s4.ingestHeartbeat(tok, body);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(out));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const port = srv.address().port;
+
+    try {
+      const colDir = fs.mkdtempSync(path.join(tmpDir, "col-batch-"));
+      const col = new MemberLedgerCollector({
+        configPath: path.join(colDir, "config.json"),
+        defaultConfigPath: path.join(colDir, "config.default.json"),
+        statePath: path.join(colDir, "state.json"),
+        transcriptRoots: [],
+      });
+      col.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, memberToken: m.member_token });
+      const now = Date.now();
+      col.state.pendingEvents = Array.from({ length: 180 }, (_, idx) => ({
+        id: `backlog:s${idx + 1}`,
+        poolKey: "gemini",
+        modelName: "gemini-4-neon-xhigh",
+        requestCount: 1,
+        uncachedInputTokens: 3000,
+        cacheReadTokens: 10000,
+        cacheWriteTokens: 0,
+        outputTokens: 200,
+        timestampMs: now - (180 - idx) * 1000,
+      }));
+      const res = await col.syncOnce();
+      assert.equal(res.ok, true);
+      assert.equal(res.state.pendingQueueCount, 0, "180 条积压记录应在同一轮同步内按 80/80/20 自动清空");
+      assert.equal(reqCount, 3, "180 条应拆分为 3 次请求（80 + 80 + 20）");
+      assert.ok(batchCalls >= 5, "服务端应使用 adapter.batch 分块写入");
+      const cntRow = await wrappedAdapter.first("SELECT COUNT(*) AS cnt FROM usage_reports WHERE member_id = ?", [m.id]);
+      assert.equal(Number(cntRow.cnt), 180, "180 条记录必须全部准确入库");
+    } finally {
+      srv.close();
+    }
+  });
+
   console.log(`\nALL E2E TESTS PASSED (${passed}/${passed})`);
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });

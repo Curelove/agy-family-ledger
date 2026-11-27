@@ -1,5 +1,5 @@
 /**
- * Antigravity 家庭组共享额度看板 · 统一数据存储层 (v1.3.0)
+ * Antigravity 家庭组共享额度看板 · 统一数据存储层 (v1.3.1)
  *
  * 兼容两类 SQLite 后端（纯标准 JS，零 Node 专有依赖，可直接部署 Cloudflare Workers）：
  * 1. Cloudflare D1（通过 wrapD1Adapter(env.DB)）
@@ -78,6 +78,11 @@ export function wrapD1Adapter(d1) {
     async run(sql, params = []) {
       return await d1.prepare(sql).bind(...params).run();
     },
+    async batch(stmts = []) {
+      if (!Array.isArray(stmts) || stmts.length === 0) return [];
+      const prepared = stmts.map((s) => d1.prepare(s.sql).bind(...(s.params || [])));
+      return await d1.batch(prepared);
+    },
   };
 }
 
@@ -97,6 +102,15 @@ export function wrapNodeSqliteAdapter(db) {
     async run(sql, params = []) {
       const stmt = db.prepare(sql);
       return stmt.run(...params);
+    },
+    async batch(stmts = []) {
+      if (!Array.isArray(stmts) || stmts.length === 0) return [];
+      const results = [];
+      for (const s of stmts) {
+        const stmt = db.prepare(s.sql);
+        results.push(stmt.run(...(s.params || [])));
+      }
+      return results;
     },
   };
 }
@@ -735,8 +749,12 @@ export class LedgerStore {
     let acceptedEvents = 0;
     const MAX_SINGLE_EVENT_TOKENS = 20_000_000;
 
-    // 1. 写入幂等增量 Token 上报
+    // 1. 写入幂等增量 Token 上报（采用批量提交，避免 Cloudflare D1 逐条串行写入导致大批次补传超时）
     const events = Array.isArray(payload.usageEvents) ? payload.usageEvents : [];
+    const insertSql = `INSERT OR IGNORE INTO usage_reports
+          (id, member_id, slice_start_ms, event_ts_ms, pool_key, model_name, request_count, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, weighted_units, settled_snapshot_id, reported_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`;
+    const pendingStmts = [];
     for (const ev of events.slice(0, 500)) {
       if (!ev || typeof ev !== "object") continue;
       const evId = String(ev.id || "").trim().slice(0, 96);
@@ -761,14 +779,25 @@ export class LedgerStore {
         outputTokens: output,
       });
       const fullId = `${member.id}:${evId}`;
-      const res = await this.db.run(
-        `INSERT OR IGNORE INTO usage_reports
-          (id, member_id, slice_start_ms, event_ts_ms, pool_key, model_name, request_count, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, weighted_units, settled_snapshot_id, reported_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-        [fullId, member.id, sliceStartMs, Math.round(tsMs), poolKey, modelName, reqCount, uncached, cacheRead, cacheWrite, output, weighted, nowIso]
-      );
-      if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) {
-        acceptedEvents++;
+      pendingStmts.push({
+        sql: insertSql,
+        params: [fullId, member.id, sliceStartMs, Math.round(tsMs), poolKey, modelName, reqCount, uncached, cacheRead, cacheWrite, output, weighted, nowIso],
+      });
+    }
+
+    const BATCH_CHUNK = 50;
+    for (let i = 0; i < pendingStmts.length; i += BATCH_CHUNK) {
+      const chunk = pendingStmts.slice(i, i + BATCH_CHUNK);
+      if (typeof this.db.batch === "function") {
+        const results = await this.db.batch(chunk);
+        for (const res of results || []) {
+          if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) acceptedEvents++;
+        }
+      } else {
+        for (const s of chunk) {
+          const res = await this.db.run(s.sql, s.params);
+          if ((res?.changes ?? res?.meta?.changes ?? 0) > 0) acceptedEvents++;
+        }
       }
     }
 

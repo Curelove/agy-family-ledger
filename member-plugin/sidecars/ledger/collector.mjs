@@ -1,5 +1,5 @@
 /**
- * 成员端零隐私侵入数据采集器 (v1.3.0 · Windows / macOS / Linux 全平台零依赖)
+ * 成员端零隐私侵入数据采集器 (v1.3.1 · Windows / macOS / Linux 全平台零依赖)
  *
  * 严格隐私边界：
  * 1. 读取本机 Antigravity 会话日志 transcript.jsonl 时，仅读取顶层纯数字 Token 计数、模型名、步数索引与时间戳，
@@ -14,7 +14,7 @@ import http from "node:http";
 import tls from "node:tls";
 import crypto from "node:crypto";
 
-const CLIENT_VERSION = "1.3.0";
+const CLIENT_VERSION = "1.3.1";
 const MAX_PENDING_QUEUE = 1500;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES_PER_POLL = 8 * 1024 * 1024;
@@ -1052,30 +1052,40 @@ export class MemberLedgerCollector {
       return { ok: false, reason: "not_configured", state: this.getPublicState() };
     }
 
-    const batch = this.state.pendingEvents.slice(0, 200);
-    const batchIds = new Set(batch.map((e) => e.id));
     const endpoint = `${this.config.serverUrl.replace(/\/+$/, "")}/api/member/heartbeat`;
 
     try {
-      const { ok, status, data } = await postJsonRequest(
-        endpoint,
-        {
-          "User-Agent": `AgyFamilyLedger/${CLIENT_VERSION}`,
-          "Content-Type": "application/json",
-          "X-Member-Token": this.config.memberToken,
-        },
-        {
-          clientVersion: CLIENT_VERSION,
-          usageEvents: batch,
-          quotaSnapshots: qRes.ok ? qRes.snapshots : [],
-        },
-        { proxyUrl: this.config.proxyUrl, timeoutMs: 12000 }
-      );
-      if (!ok || !data?.ok) {
-        throw new Error(data?.error || `中转服务返回 HTTP ${status}`);
+      // 单次心跳最多携带 80 条记录并给足 25 秒超时；若有积压队列则连续分批平滑补传（单轮最多 4 批）
+      let lastData = null;
+      const MAX_DRAIN_ROUNDS = 4;
+      for (let round = 0; round < MAX_DRAIN_ROUNDS; round++) {
+        const batch = this.state.pendingEvents.slice(0, 80);
+        const batchIds = new Set(batch.map((e) => e.id));
+        const sendSnapshots = round === 0 && qRes.ok ? qRes.snapshots : [];
+        const { ok, status, data } = await postJsonRequest(
+          endpoint,
+          {
+            "User-Agent": `AgyFamilyLedger/${CLIENT_VERSION}`,
+            "Content-Type": "application/json",
+            "X-Member-Token": this.config.memberToken,
+          },
+          {
+            clientVersion: CLIENT_VERSION,
+            usageEvents: batch,
+            quotaSnapshots: sendSnapshots,
+          },
+          { proxyUrl: this.config.proxyUrl, timeoutMs: 25000 }
+        );
+        if (!ok || !data?.ok) {
+          throw new Error(data?.error || `中转服务返回 HTTP ${status}`);
+        }
+        // 按精确已送达 ID 剔除，绝不误删请求在途期间新采集到的事件
+        this.state.pendingEvents = this.state.pendingEvents.filter((e) => !batchIds.has(e.id));
+        lastData = data;
+        if (this.state.pendingEvents.length === 0) break;
       }
-      // 按精确已送达 ID 剔除，绝不误删请求在途期间新采集到的事件
-      this.state.pendingEvents = this.state.pendingEvents.filter((e) => !batchIds.has(e.id));
+
+      const data = lastData || {};
       this.state.lastSyncAt = new Date().toISOString();
       this.state.lastError = "";
       if (data.member) {

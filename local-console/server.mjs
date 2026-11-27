@@ -451,7 +451,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         ok: true,
         app: "agy-family-ledger-console",
-        version: "1.3.0",
+        version: "1.3.1",
         mode: cfg.mode,
         port: PORT,
       });
@@ -568,7 +568,7 @@ server.listen(PORT, "127.0.0.1", () => {
     JSON.stringify({
       ok: true,
       app: "agy-family-ledger-console",
-      version: "1.3.0",
+      version: "1.3.1",
       url: `http://127.0.0.1:${PORT}`,
       mode: loadConsoleConfig().mode,
     })
